@@ -27,10 +27,19 @@ dark theme and does not start a web server.
 
 Features:
 
-- opening a local `vocab.db` copied from a Kindle;
+- automatically finding a USB-mounted Kindle and loading
+  `system/vocabulary/vocab.db` into a local cache;
+- manually opening a local `vocab.db` as a fallback;
 - selecting a specific book;
+- searching across words, contexts, and book metadata;
 - previewing words and contexts;
-- exporting TSV for Anki or Quizlet.
+- exporting the current filtered selection to Anki or Quizlet.
+
+The application checks for newly connected devices every three seconds. On
+Windows it supports both ordinary drive letters and Kindle devices shown in
+Explorer as `This PC > Kindle` through MTP/WPD. It also supports macOS
+`/Volumes` and common Linux mount locations under `/media`, `/run/media`, and
+`/mnt`.
 
 ## Export for Anki
 

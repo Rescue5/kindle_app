@@ -1,0 +1,6 @@
+.app-data/
+__pycache__/
+*.py[cod]
+*.egg-info/
+vocab.db
+kindle-*.tsv

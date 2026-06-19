@@ -3,5 +3,8 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+node_modules/
+dist/
+.npm-cache/
 vocab.db
 kindle-*.tsv

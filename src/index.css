@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --background: 222 70% 5%;
+    --foreground: 214 48% 93%;
+    --card: 218 52% 9%;
+    --card-foreground: 214 48% 93%;
+    --popover: 218 52% 9%;
+    --popover-foreground: 214 48% 93%;
+    --primary: 214 100% 68%;
+    --primary-foreground: 222 70% 5%;
+    --secondary: 219 44% 14%;
+    --secondary-foreground: 214 48% 92%;
+    --muted: 218 34% 14%;
+    --muted-foreground: 215 19% 62%;
+    --accent: 174 68% 62%;
+    --accent-foreground: 222 70% 5%;
+    --destructive: 348 86% 62%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 42% 20%;
+    --input: 217 36% 16%;
+    --ring: 199 89% 65%;
+    --radius: 18px;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    overflow: hidden;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+@layer utilities {
+  .glass {
+    background:
+      linear-gradient(180deg, rgba(13, 30, 52, 0.82), rgba(5, 17, 32, 0.76)),
+      rgba(8, 24, 44, 0.72);
+    border: 1px solid rgba(148, 199, 255, 0.16);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 22px 60px rgba(0, 0, 0, 0.34);
+    backdrop-filter: blur(28px);
+  }
+
+  .premium-grid {
+    background-image:
+      linear-gradient(rgba(148, 199, 255, 0.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(148, 199, 255, 0.04) 1px, transparent 1px);
+    background-size: 42px 42px, 42px 42px;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+}

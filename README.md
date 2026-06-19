@@ -15,15 +15,32 @@ computer first, then run the exporter against the copy.
 Install the app into the conda environment, then run:
 
 ```powershell
-conda activate kindle-vocab-app
+conda activate kindle_app
+npm install
 kindle-vocab-app
 ```
 
 The Kindle database and generated exports are local user data and are excluded
 from version control.
 
-The native Qt application supports Windows, macOS, and Linux. It uses a built-in
-dark theme and does not start a web server.
+The desktop shell is built with React, TypeScript, Tailwind, and Tauri. Python
+stays responsible for Kindle database access, deterministic scoring, exports,
+and DS Lab / DeepSeek enrichment through the local Tauri bridge.
+
+Logs are written to the local app data directory:
+
+```text
+<AppLocalData>/logs/kindle_vocab_app.log
+```
+
+The CLI writes logs under the selected output directory:
+
+```text
+<output_dir>/logs/kindle_vocab_app.log
+```
+
+Set `KINDLE_VOCAB_LOG_LEVEL=DEBUG` to include detailed per-word processing
+events.
 
 Features:
 

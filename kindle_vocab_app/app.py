@@ -3,7 +3,18 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QStandardPaths, QTimer, Qt
+from PySide6.QtCore import (
+    QAbstractAnimation,
+    QEasingCurve,
+    QObject,
+    QPropertyAnimation,
+    QSize,
+    QStandardPaths,
+    QThread,
+    QTimer,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -12,6 +23,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -19,6 +32,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -28,23 +42,29 @@ from PySide6.QtWidgets import (
 
 from kindle_vocab_app.kindle_db import export_entries, fetch_entries, list_books, validate_vocab_db
 from kindle_vocab_app.kindle_device import find_kindle_source
+from kindle_vocab_app.llm_enricher import (
+    enrich_optimized_tsv,
+    has_dslab_api_key,
+)
 from kindle_vocab_app.vocab_optimizer import optimize_entries
 
 
 COLORS = {
     "window": "#0d0f14",
     "sidebar": "#12151c",
-    "surface": "#171b23",
-    "surface_hover": "#1d222c",
-    "surface_active": "#232a36",
-    "border": "#292f3b",
-    "border_strong": "#353d4c",
+    "surface": "#171c24",
+    "surface_hover": "#202735",
+    "surface_active": "#263044",
+    "border": "#2b3444",
+    "border_strong": "#3c4658",
     "text": "#f3f5f8",
-    "muted": "#929baa",
-    "subtle": "#677181",
-    "primary": "#5b8cff",
-    "primary_hover": "#709bff",
-    "primary_pressed": "#4d7ce6",
+    "muted": "#a2abb9",
+    "subtle": "#707b8c",
+    "primary": "#76a2ff",
+    "primary_hover": "#8db2ff",
+    "primary_pressed": "#5f8ff0",
+    "amber": "#f0bf5f",
+    "mint": "#65d0aa",
     "success": "#55c59a",
 }
 
@@ -71,40 +91,69 @@ QWidget {{
 }}
 QMainWindow {{ background: {COLORS['window']}; }}
 QFrame#sidebar {{
-    background: {COLORS['sidebar']};
+    background: #10141d;
     border-right: 1px solid {COLORS['border']};
 }}
-QFrame#sourcePanel, QFrame#metricPanel {{
+QFrame#sourcePanel, QFrame#metricPanel, QFrame#thoughtPanel {{
     background: {COLORS['surface']};
     border: 1px solid {COLORS['border']};
     border-radius: 8px;
 }}
-QLabel#brandTitle {{ font-size: 17px; font-weight: 700; }}
-QLabel#pageTitle {{ font-size: 26px; font-weight: 700; }}
+QFrame#thoughtBubble {{
+    background: #202838;
+    border: 1px solid #334057;
+    border-radius: 8px;
+}}
+QFrame#thoughtBubble[phase="thinking"] {{
+    background: #1d2739;
+    border-color: #3b5276;
+}}
+QFrame#thoughtBubble[phase="answered"] {{
+    background: #1c2b2a;
+    border-color: #2f6a5a;
+}}
+QFrame#thoughtBubble[phase="failed"] {{
+    background: #302128;
+    border-color: #713f4e;
+}}
+QLabel#brandTitle {{ font-size: 18px; font-weight: 750; }}
+QLabel#pageTitle {{ font-size: 28px; font-weight: 750; }}
 QLabel#sectionLabel {{
     color: {COLORS['muted']};
     font-size: 11px;
     font-weight: 700;
+    letter-spacing: 0px;
 }}
 QLabel#mutedLabel {{ color: {COLORS['muted']}; }}
 QLabel#subtleLabel {{ color: {COLORS['subtle']}; font-size: 12px; }}
 QLabel#fileName {{ font-weight: 600; }}
 QLabel#statusReady {{ color: {COLORS['success']}; font-size: 12px; }}
 QLabel#metricValue {{ font-size: 18px; font-weight: 700; }}
+QLabel#thoughtTitle {{ color: {COLORS['text']}; font-size: 13px; font-weight: 700; }}
+QLabel#thoughtBody {{ color: #c6cfdd; font-size: 12px; line-height: 150%; }}
+QLabel#thoughtMeta {{ color: {COLORS['subtle']}; font-size: 11px; }}
+QLabel#pulseDot {{
+    background: {COLORS['primary']};
+    border-radius: 4px;
+    min-width: 8px;
+    max-width: 8px;
+    min-height: 8px;
+    max-height: 8px;
+}}
 QLabel#countBadge {{
-    background: #202b42;
-    color: #a9c2ff;
-    border: 1px solid #314468;
+    background: #21314d;
+    color: #c1d2ff;
+    border: 1px solid #3b557f;
     border-radius: 8px;
-    padding: 4px 9px;
+    padding: 5px 10px;
     font-weight: 600;
 }}
 QPushButton {{
     background: {COLORS['surface']};
     border: 1px solid {COLORS['border_strong']};
-    border-radius: 7px;
+    border-radius: 8px;
     min-height: 22px;
-    padding: 9px 12px;
+    padding: 10px 13px;
     text-align: left;
     font-weight: 600;
 }}
@@ -124,8 +173,8 @@ QPushButton#primaryButton:pressed {{ background: {COLORS['primary_pressed']}; }}
 QLineEdit, QComboBox {{
     background: {COLORS['surface']};
     border: 1px solid {COLORS['border']};
-    border-radius: 7px;
-    padding: 9px 11px;
+    border-radius: 8px;
+    padding: 10px 12px;
     min-height: 22px;
     selection-background-color: {COLORS['primary']};
 }}
@@ -142,7 +191,7 @@ QComboBox QAbstractItemView {{
 }}
 QTableWidget {{
     background: {COLORS['surface']};
-    alternate-background-color: #151920;
+    alternate-background-color: #151a22;
     border: 1px solid {COLORS['border']};
     border-radius: 8px;
     gridline-color: transparent;
@@ -151,11 +200,11 @@ QTableWidget {{
     outline: 0;
 }}
 QTableWidget::item {{
-    border-bottom: 1px solid #202630;
-    padding: 6px 8px;
+    border-bottom: 1px solid #222b38;
+    padding: 7px 9px;
 }}
 QHeaderView::section {{
-    background: #1b2029;
+    background: #1d2430;
     color: #aeb6c3;
     border: 0;
     border-bottom: 1px solid {COLORS['border']};
@@ -164,14 +213,238 @@ QHeaderView::section {{
     font-weight: 700;
 }}
 QCheckBox {{ color: {COLORS['muted']}; spacing: 9px; }}
+QScrollArea#thoughtScroll {{
+    background: transparent;
+    border: 0;
+}}
+QScrollArea#thoughtScroll QWidget {{
+    background: transparent;
+}}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 4px 2px; }}
-QScrollBar::handle:vertical {{ background: #3a4352; border-radius: 4px; min-height: 28px; }}
-QScrollBar::handle:vertical:hover {{ background: #4a5567; }}
+QScrollBar::handle:vertical {{ background: #414c60; border-radius: 5px; min-height: 28px; }}
+QScrollBar::handle:vertical:hover {{ background: #556178; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px 4px; }}
 QScrollBar::handle:horizontal {{ background: #3a4352; border-radius: 4px; min-width: 28px; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 """
+
+
+def add_soft_shadow(widget: QWidget, blur: int = 26, y_offset: int = 10) -> None:
+    shadow = QGraphicsDropShadowEffect(widget)
+    shadow.setBlurRadius(blur)
+    shadow.setOffset(0, y_offset)
+    shadow.setColor(QColor(0, 0, 0, 85))
+    widget.setGraphicsEffect(shadow)
+
+
+class ThinkingPulse(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        self.animations: list[QPropertyAnimation] = []
+
+        for index in range(3):
+            dot = QLabel()
+            dot.setObjectName("pulseDot")
+            effect = QGraphicsOpacityEffect(dot)
+            effect.setOpacity(0.28)
+            dot.setGraphicsEffect(effect)
+            layout.addWidget(dot)
+
+            animation = QPropertyAnimation(effect, b"opacity", self)
+            animation.setStartValue(0.22)
+            animation.setKeyValueAt(0.5, 1.0)
+            animation.setEndValue(0.22)
+            animation.setDuration(1050)
+            animation.setLoopCount(-1)
+            animation.setEasingCurve(QEasingCurve.Type.InOutSine)
+            QTimer.singleShot(index * 160, animation.start)
+            self.animations.append(animation)
+
+
+class ThoughtStream(QFrame):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("thoughtPanel")
+        self.setMinimumHeight(164)
+        self.setMaximumHeight(220)
+        add_soft_shadow(self, blur=24, y_offset=8)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        title = QLabel("AI-процесс")
+        title.setObjectName("thoughtTitle")
+        self.status_label = QLabel("Готов к обработке")
+        self.status_label.setObjectName("thoughtMeta")
+        self.pulse = ThinkingPulse()
+        self.pulse.setVisible(False)
+        header.addWidget(title)
+        header.addWidget(self.status_label)
+        header.addStretch()
+        header.addWidget(self.pulse)
+        layout.addLayout(header)
+
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("thoughtScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_body = QWidget()
+        self.scroll_layout = QVBoxLayout(self.scroll_body)
+        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_layout.setSpacing(8)
+        self.scroll_layout.addStretch()
+        self.scroll.setWidget(self.scroll_body)
+        layout.addWidget(self.scroll, 1)
+
+        self.add_system_message("Локальная статистика готовит кандидатов, AI заполнит смысл и контекст.")
+
+    def start(self) -> None:
+        self.pulse.setVisible(True)
+        self.status_label.setText("Думает")
+        self.clear()
+        self.add_system_message("Запускаю анализ слов и подготовку карточек.")
+
+    def finish(self, text: str) -> None:
+        self.pulse.setVisible(False)
+        self.status_label.setText("Готово")
+        self.add_system_message(text)
+
+    def fail(self, text: str) -> None:
+        self.pulse.setVisible(False)
+        self.status_label.setText("Нужна проверка")
+        self.add_event({"phase": "failed", "word": "Ошибка", "message": text})
+
+    def clear(self) -> None:
+        while self.scroll_layout.count() > 1:
+            item = self.scroll_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def add_system_message(self, text: str) -> None:
+        self.add_event({"phase": "thinking", "word": "Kindle Cards", "message": text})
+
+    def add_event(self, event: dict[str, object]) -> None:
+        phase = str(event.get("phase") or "thinking")
+        word = str(event.get("word") or event.get("base_form") or "AI")
+        score = event.get("score")
+        if phase == "thinking":
+            body = str(event.get("message") or "Подбираю смысл по статистике и контексту.")
+            meta = "ожидание ответа модели"
+        elif phase == "answered":
+            reasoning = str(event.get("reasoning") or "").strip()
+            answer = str(event.get("answer") or "").strip()
+            body = reasoning or answer or "Карточка заполнена."
+            meta = f"важность {score}/10" if score != "" else "ответ модели"
+        else:
+            body = str(event.get("message") or "Не удалось заполнить это слово.")
+            meta = "ошибка обработки"
+
+        bubble = self._bubble(word=word, body=_shorten(body, 360), meta=meta, phase=phase)
+        self.scroll_layout.insertWidget(max(0, self.scroll_layout.count() - 1), bubble)
+        self._fade_in(bubble)
+        QTimer.singleShot(30, self._scroll_to_bottom)
+
+    def _bubble(self, *, word: str, body: str, meta: str, phase: str) -> QFrame:
+        bubble = QFrame()
+        bubble.setObjectName("thoughtBubble")
+        bubble.setProperty("phase", phase)
+        bubble.style().unpolish(bubble)
+        bubble.style().polish(bubble)
+        layout = QVBoxLayout(bubble)
+        layout.setContentsMargins(11, 9, 11, 9)
+        layout.setSpacing(4)
+
+        title = QLabel(word)
+        title.setObjectName("thoughtTitle")
+        title.setWordWrap(True)
+        text = QLabel(body)
+        text.setObjectName("thoughtBody")
+        text.setWordWrap(True)
+        caption = QLabel(meta)
+        caption.setObjectName("thoughtMeta")
+        caption.setWordWrap(True)
+
+        layout.addWidget(title)
+        layout.addWidget(text)
+        layout.addWidget(caption)
+        return bubble
+
+    def _fade_in(self, widget: QWidget) -> None:
+        effect = QGraphicsOpacityEffect(widget)
+        effect.setOpacity(0.0)
+        widget.setGraphicsEffect(effect)
+        animation = QPropertyAnimation(effect, b"opacity", widget)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setDuration(280)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        animation.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def _scroll_to_bottom(self) -> None:
+        bar = self.scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+
+class OptimizationWorker(QObject):
+    progress = Signal(object)
+    finished = Signal(object, str)
+    failed = Signal(str)
+
+    def __init__(self, entries: list[dict[str, object]], output_dir: Path, snapshot_path: Path) -> None:
+        super().__init__()
+        self.entries = entries
+        self.output_dir = output_dir
+        self.snapshot_path = snapshot_path
+
+    def run(self) -> None:
+        try:
+            result = optimize_entries(self.entries, self.output_dir, self.snapshot_path)
+            llm_summary = ""
+            if has_dslab_api_key():
+                try:
+                    enrichment = enrich_optimized_tsv(
+                        result.tsv_path,
+                        analysis_dir=result.analysis_dir,
+                        progress_callback=self.progress.emit,
+                    )
+                    llm_summary = (
+                        f"\nAI заполнено: {enrichment.processed}, "
+                        f"пропущено: {enrichment.skipped}, ошибок: {enrichment.failed}"
+                    )
+                except Exception as exc:
+                    llm_summary = f"\nAI заполнение пропущено: {exc}"
+                    self.progress.emit(
+                        {
+                            "phase": "failed",
+                            "word": "AI",
+                            "message": str(exc),
+                        }
+                    )
+            else:
+                self.progress.emit(
+                    {
+                        "phase": "thinking",
+                        "word": "AI",
+                        "message": "Ключ DS Lab не найден, поэтому заполнение моделью пропущено.",
+                    }
+                )
+            self.finished.emit(result, llm_summary)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+def _shorten(text: str, limit: int) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "..."
 
 
 class MainWindow(QMainWindow):
@@ -182,6 +455,8 @@ class MainWindow(QMainWindow):
         self.filtered_entries: list[dict[str, object]] = []
         self.book_count = 0
         self.device_signature: tuple[str, ...] | None = None
+        self.optimization_thread: QThread | None = None
+        self.optimization_worker: OptimizationWorker | None = None
 
         self.setWindowTitle("Kindle Cards")
         self.setWindowIcon(lucide_icon("book-open", COLORS["primary"], 32))
@@ -248,6 +523,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._section_label("ИСТОЧНИК"))
         source_panel = QFrame()
         source_panel.setObjectName("sourcePanel")
+        add_soft_shadow(source_panel, blur=18, y_offset=6)
         source_layout = QVBoxLayout(source_panel)
         source_layout.setContentsMargins(13, 12, 13, 12)
         source_layout.setSpacing(5)
@@ -377,6 +653,9 @@ class MainWindow(QMainWindow):
         metrics_row.addStretch(2)
         layout.addLayout(metrics_row)
 
+        self.thought_stream = ThoughtStream()
+        layout.addWidget(self.thought_stream)
+
         self.content_stack = QStackedWidget()
         self.content_stack.addWidget(self._build_empty_state())
         self.content_stack.addWidget(self._build_table())
@@ -434,6 +713,7 @@ class MainWindow(QMainWindow):
         panel = QFrame()
         panel.setObjectName("metricPanel")
         panel.setMinimumWidth(180)
+        add_soft_shadow(panel, blur=18, y_offset=6)
         layout = QHBoxLayout(panel)
         layout.setContentsMargins(13, 10, 13, 10)
         icon = QLabel()
@@ -641,36 +921,90 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Нет данных", "В текущей выборке нет записей.")
             return
 
-        try:
-            result = optimize_entries(
-                self.filtered_entries,
-                self._processing_dir(),
-                self._snapshot_path(),
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Ошибка обработки", str(exc))
+        if self.optimization_thread is not None:
             return
 
-        self.optimize_hint.setText(
-            f"Новых: {result.processed_new}, в TSV: {result.accepted_new}, "
-            f"пропущено: {result.skipped_existing}"
+        self.thought_stream.start()
+        self.file_status_label.setText("Обработка слов...")
+        self.optimize_hint.setText("Локальная статистика и AI готовят карточки")
+        self._set_processing_enabled(False)
+
+        self.optimization_thread = QThread(self)
+        self.optimization_worker = OptimizationWorker(
+            list(self.filtered_entries),
+            self._processing_dir(),
+            self._snapshot_path(),
         )
-        self.file_status_label.setText(f"Оптимизировано новых слов: {result.accepted_new}")
-        self.file_status_label.setToolTip(str(result.tsv_path))
+        self.optimization_worker.moveToThread(self.optimization_thread)
+        self.optimization_thread.started.connect(self.optimization_worker.run)
+        self.optimization_worker.progress.connect(self._on_optimization_progress)
+        self.optimization_worker.finished.connect(self._on_optimization_finished)
+        self.optimization_worker.failed.connect(self._on_optimization_failed)
+        self.optimization_worker.finished.connect(self.optimization_thread.quit)
+        self.optimization_worker.failed.connect(self.optimization_thread.quit)
+        self.optimization_thread.finished.connect(self.optimization_worker.deleteLater)
+        self.optimization_thread.finished.connect(self.optimization_thread.deleteLater)
+        self.optimization_thread.finished.connect(self._clear_optimization_worker)
+        self.optimization_thread.start()
+
+    def _on_optimization_progress(self, event: object) -> None:
+        if isinstance(event, dict):
+            self.thought_stream.add_event(event)
+
+    def _on_optimization_finished(self, result: object, llm_summary: str) -> None:
+        processed_new = getattr(result, "processed_new", 0)
+        accepted_new = getattr(result, "accepted_new", 0)
+        rejected_new = getattr(result, "rejected_new", 0)
+        skipped_existing = getattr(result, "skipped_existing", 0)
+        tsv_path = getattr(result, "tsv_path", "")
+        analysis_dir = getattr(result, "analysis_dir", "")
+
+        summary_text = str(llm_summary or "")
+
+        self.optimize_hint.setText(
+            f"Новых: {processed_new}, в TSV: {accepted_new}, "
+            f"пропущено: {skipped_existing}{summary_text}"
+        )
+        self.file_status_label.setText(f"Оптимизировано новых слов: {accepted_new}")
+        self.file_status_label.setToolTip(str(tsv_path))
+        self.thought_stream.finish(f"Готово: {accepted_new} слов добавлено в TSV.")
+        self._set_processing_enabled(True)
         QMessageBox.information(
             self,
             "Обработка завершена",
             "\n".join(
-                [
-                    f"Новых слов обработано: {result.processed_new}",
-                    f"Добавлено в TSV: {result.accepted_new}",
-                    f"Отклонено фильтрами: {result.rejected_new}",
-                    f"Уже были в слепке: {result.skipped_existing}",
-                    f"TSV: {result.tsv_path}",
-                    f"JSON: {result.analysis_dir}",
+                line
+                for line in [
+                    f"Новых слов обработано: {processed_new}",
+                    f"Добавлено в TSV: {accepted_new}",
+                    f"Отклонено фильтрами: {rejected_new}",
+                    f"Уже были в слепке: {skipped_existing}",
+                    summary_text.strip(),
+                    f"TSV: {tsv_path}",
+                    f"JSON: {analysis_dir}",
                 ]
+                if line
             ),
         )
+
+    def _on_optimization_failed(self, message: str) -> None:
+        self._set_processing_enabled(True)
+        self.thought_stream.fail(message)
+        QMessageBox.critical(self, "Ошибка обработки", message)
+
+    def _set_processing_enabled(self, enabled: bool) -> None:
+        has_entries = bool(self.filtered_entries)
+        self.open_button.setEnabled(enabled)
+        self.manual_button.setEnabled(enabled)
+        self.anki_button.setEnabled(enabled and has_entries)
+        self.quizlet_button.setEnabled(enabled and has_entries)
+        self.optimize_button.setEnabled(enabled and has_entries)
+        self.search_input.setEnabled(enabled and bool(self.db_path))
+        self.book_combo.setEnabled(enabled and bool(self.db_path))
+
+    def _clear_optimization_worker(self) -> None:
+        self.optimization_thread = None
+        self.optimization_worker = None
 
 
 def _dark_palette() -> QPalette:

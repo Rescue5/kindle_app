@@ -51,8 +51,14 @@ lemmas and phrases are not processed again. It writes:
 - `optimized.tsv`: same columns as the existing optimized Anki template;
 - `word_analysis/*.json`: detailed deterministic scoring audit per new word.
 
-Translations and generated example sentences are intentionally left blank for a
-later model step.
+Translations and generated example sentences can be filled by DeepSeek V4 Flash
+through the DS Lab OpenAI-compatible API. Put your key into `.env`:
+
+```dotenv
+DSLAB_API_KEY=your_key_here
+DSLAB_BASE_URL=https://api.dslab.tech/v1
+DSLAB_MODEL=deepseek-v4-flash
+```
 
 The scoring uses local deterministic signals: normalization, context-aware
 POS tagging when NLTK data is available, WordNet lemmatization and Lesk sense
@@ -64,6 +70,20 @@ CLI usage:
 
 ```powershell
 kindle-vocab-optimize .\vocab.db .\.app-data\optimized
+```
+
+To run the local analysis and then fill translations, generated context, and
+revised importance with DeepSeek:
+
+```powershell
+kindle-vocab-optimize .\vocab.db .\.app-data\optimized --llm
+```
+
+To enrich an already generated `optimized.tsv` without reading the Kindle
+database again:
+
+```powershell
+kindle-vocab-optimize .\.app-data\optimized --enrich-existing-tsv .\.app-data\optimized\optimized.tsv
 ```
 
 To seed the snapshot from an existing optimized TSV:

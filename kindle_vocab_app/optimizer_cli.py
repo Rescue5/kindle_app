@@ -3,14 +3,18 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from kindle_vocab_app.kindle_db import fetch_entries, validate_vocab_db
-from kindle_vocab_app.vocab_optimizer import optimize_entries, seed_snapshot_from_optimized_tsv
+from kindle_vocab_app.llm_enricher import LLMEnrichmentError, enrich_optimized_tsv
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Optimize new Kindle vocabulary entries.")
-    parser.add_argument("database", type=Path, help="Path to Kindle vocab.db")
-    parser.add_argument("output_dir", type=Path, help="Directory for optimized.tsv and JSON analysis")
+    parser.add_argument("database", type=Path, nargs="?", help="Path to Kindle vocab.db")
+    parser.add_argument(
+        "output_dir",
+        type=Path,
+        nargs="?",
+        help="Directory for optimized.tsv and JSON analysis",
+    )
     parser.add_argument(
         "--snapshot",
         type=Path,
@@ -25,11 +29,63 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Import already optimized words into the processed snapshot before processing",
     )
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help="Fill translations, generated context, and revised importance with DeepSeek V4 Flash",
+    )
+    parser.add_argument(
+        "--llm-force",
+        action="store_true",
+        help="Re-run DeepSeek enrichment even for rows that already have generated fields",
+    )
+    parser.add_argument(
+        "--llm-limit",
+        type=int,
+        default=None,
+        help="Limit the number of rows sent to the LLM in this run",
+    )
+    parser.add_argument(
+        "--enrich-existing-tsv",
+        type=Path,
+        default=None,
+        help="Only enrich an existing optimized TSV and skip reading the Kindle database",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.enrich_existing_tsv and args.output_dir is None and args.database is not None:
+        args.output_dir = args.database
+        args.database = None
+    if args.output_dir is None:
+        print("Missing output_dir.")
+        return 2
+    if args.enrich_existing_tsv:
+        try:
+            result = enrich_optimized_tsv(
+                args.enrich_existing_tsv,
+                analysis_dir=args.output_dir / "word_analysis",
+                force=args.llm_force,
+                limit=args.llm_limit,
+            )
+        except LLMEnrichmentError as exc:
+            print(f"LLM enrichment skipped: {exc}")
+            return 2
+        print(f"LLM enriched rows: {result.processed}")
+        print(f"LLM skipped rows: {result.skipped}")
+        print(f"LLM failed rows: {result.failed}")
+        print(f"TSV: {result.tsv_path}")
+        return 0
+
+    if args.database is None:
+        print("Missing database path.")
+        return 2
+
+    from kindle_vocab_app.kindle_db import fetch_entries, validate_vocab_db
+    from kindle_vocab_app.vocab_optimizer import optimize_entries, seed_snapshot_from_optimized_tsv
+
     validate_vocab_db(args.database)
     snapshot_path = args.snapshot or args.output_dir / "processed_snapshot.json"
     if args.seed_optimized_tsv:
@@ -48,6 +104,20 @@ def main() -> int:
     print(f"TSV: {result.tsv_path}")
     print(f"JSON: {result.analysis_dir}")
     print(f"Snapshot: {result.snapshot_path}")
+    if args.llm:
+        try:
+            enrichment = enrich_optimized_tsv(
+                result.tsv_path,
+                analysis_dir=result.analysis_dir,
+                force=args.llm_force,
+                limit=args.llm_limit,
+            )
+        except LLMEnrichmentError as exc:
+            print(f"LLM enrichment skipped: {exc}")
+            return 2
+        print(f"LLM enriched rows: {enrichment.processed}")
+        print(f"LLM skipped rows: {enrichment.skipped}")
+        print(f"LLM failed rows: {enrichment.failed}")
     return 0
 
 

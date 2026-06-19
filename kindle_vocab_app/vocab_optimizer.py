@@ -15,27 +15,8 @@ from wordfreq import zipf_frequency
 
 from kindle_vocab_app.genre_config import ProcessingConfig, load_processing_config
 from kindle_vocab_app.processing_state import ProcessedSnapshot, utc_now
+from kindle_vocab_app.tsv_schema import OPTIMIZED_TSV_HEADER
 
-
-OPTIMIZED_TSV_HEADER = [
-    "Word",
-    "Base form",
-    "Russian meaning(s)",
-    "Generated context sentence EN",
-    "Generated context sentence RU",
-    "Importance 0-10",
-    "Importance note",
-    "Tags",
-    "Source word forms",
-    "Source occurrence count",
-    "Original word",
-    "Original stem",
-    "Original context",
-    "Original book_title",
-    "Original authors",
-    "Original language",
-    "Original looked_up_at",
-]
 
 A1_AND_FUNCTION_WORDS = {
     "a",
@@ -857,13 +838,6 @@ def is_plausible_english_lexeme(value: str) -> bool:
 def _looks_glued(word: str) -> bool:
     if len(word) < 11 or " " in word or "-" in word:
         return False
-
-
-def _safe_int(value: object) -> int:
-    try:
-        return int(str(value or "0"))
-    except ValueError:
-        return 0
     try:
         import wordninja
 
@@ -871,3 +845,10 @@ def _safe_int(value: object) -> int:
         return len(parts) >= 2 and all(zipf_frequency(part, "en") >= 3.0 for part in parts)
     except Exception:
         return False
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(str(value or "0"))
+    except ValueError:
+        return 0

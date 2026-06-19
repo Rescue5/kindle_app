@@ -4,6 +4,10 @@ import argparse
 from pathlib import Path
 
 from kindle_vocab_app.llm_enricher import LLMEnrichmentError, enrich_optimized_tsv
+from kindle_vocab_app.logging_config import configure_logging, get_logger
+
+
+logger = get_logger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,6 +66,8 @@ def main() -> int:
     if args.output_dir is None:
         print("Missing output_dir.")
         return 2
+    log_path = configure_logging(args.output_dir / "logs", console=True)
+    logger.info("Optimizer CLI started args=%s log_path=%s", vars(args), log_path)
     if args.enrich_existing_tsv:
         try:
             result = enrich_optimized_tsv(
@@ -71,15 +77,18 @@ def main() -> int:
                 limit=args.llm_limit,
             )
         except LLMEnrichmentError as exc:
+            logger.exception("LLM enrichment command failed tsv=%s", args.enrich_existing_tsv)
             print(f"LLM enrichment skipped: {exc}")
             return 2
         print(f"LLM enriched rows: {result.processed}")
         print(f"LLM skipped rows: {result.skipped}")
         print(f"LLM failed rows: {result.failed}")
         print(f"TSV: {result.tsv_path}")
+        logger.info("Optimizer CLI finished enrich-existing mode result=%s", result)
         return 0
 
     if args.database is None:
+        logger.error("Optimizer CLI missing database path")
         print("Missing database path.")
         return 2
 
@@ -90,6 +99,7 @@ def main() -> int:
     snapshot_path = args.snapshot or args.output_dir / "processed_snapshot.json"
     if args.seed_optimized_tsv:
         seeded = seed_snapshot_from_optimized_tsv(snapshot_path, args.seed_optimized_tsv)
+        logger.info("Seeded snapshot from TSV seeded=%d path=%s", seeded, args.seed_optimized_tsv)
         print(f"Seeded processed snapshot from TSV: {seeded}")
     result = optimize_entries(
         fetch_entries(args.database, args.book_key),
@@ -104,6 +114,7 @@ def main() -> int:
     print(f"TSV: {result.tsv_path}")
     print(f"JSON: {result.analysis_dir}")
     print(f"Snapshot: {result.snapshot_path}")
+    logger.info("Local optimization completed result=%s", result)
     if args.llm:
         try:
             enrichment = enrich_optimized_tsv(
@@ -113,11 +124,14 @@ def main() -> int:
                 limit=args.llm_limit,
             )
         except LLMEnrichmentError as exc:
+            logger.exception("LLM enrichment after optimization failed tsv=%s", result.tsv_path)
             print(f"LLM enrichment skipped: {exc}")
             return 2
         print(f"LLM enriched rows: {enrichment.processed}")
         print(f"LLM skipped rows: {enrichment.skipped}")
         print(f"LLM failed rows: {enrichment.failed}")
+        logger.info("LLM enrichment after optimization completed result=%s", enrichment)
+    logger.info("Optimizer CLI finished successfully")
     return 0
 
 

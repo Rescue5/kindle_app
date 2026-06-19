@@ -9,9 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from kindle_vocab_app.logging_config import get_logger
 from kindle_vocab_app.tsv_schema import OPTIMIZED_TSV_HEADER
 
 
+logger = get_logger(__name__)
 DEFAULT_DSLAB_BASE_URL = "https://api.dslab.tech/v1"
 DEFAULT_DSLAB_MODEL = "deepseek-v4-flash"
 LLM_FILLED_FIELDS = [
@@ -36,6 +38,7 @@ class LLMEnrichmentError(RuntimeError):
 
 
 def find_env_file(start: Path | None = None) -> Path | None:
+    logger.debug("Searching for .env start=%s cwd=%s", start, Path.cwd())
     candidates = []
     if start is not None:
         candidates.append(start)
@@ -50,7 +53,9 @@ def find_env_file(start: Path | None = None) -> Path | None:
             seen.add(directory)
             env_path = directory / ".env"
             if env_path.exists():
+                logger.info("Found .env file path=%s", env_path)
                 return env_path
+    logger.info(".env file not found")
     return None
 
 
@@ -61,13 +66,17 @@ def load_dslab_environment(env_path: Path | None = None) -> None:
             from dotenv import load_dotenv
 
             load_dotenv(resolved)
+            logger.info("Loaded environment with python-dotenv path=%s", resolved)
         except ImportError:
             _load_env_file_without_dependency(resolved)
+            logger.info("Loaded environment with fallback parser path=%s", resolved)
 
 
 def has_dslab_api_key(env_path: Path | None = None) -> bool:
     load_dslab_environment(env_path)
-    return bool(os.environ.get("DSLAB_API_KEY"))
+    has_key = bool(os.environ.get("DSLAB_API_KEY"))
+    logger.info("Checked DS Lab API key availability has_key=%s", has_key)
+    return has_key
 
 
 def enrich_optimized_tsv(
@@ -80,14 +89,24 @@ def enrich_optimized_tsv(
     limit: int | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> LLMEnrichmentResult:
+    logger.info(
+        "Starting LLM enrichment tsv=%s output_path=%s analysis_dir=%s force=%s limit=%s",
+        tsv_path,
+        output_path,
+        analysis_dir,
+        force,
+        limit,
+    )
     load_dslab_environment(env_path)
     api_key = os.environ.get("DSLAB_API_KEY")
     if not api_key:
+        logger.warning("Cannot start LLM enrichment because DSLAB_API_KEY is missing")
         raise LLMEnrichmentError("DSLAB_API_KEY is missing. Add it to .env before LLM enrichment.")
 
     client = DeepSeekVocabularyClient(api_key=api_key)
     rows = _read_tsv(tsv_path)
     output = output_path or tsv_path
+    logger.info("Read optimized TSV for LLM enrichment tsv=%s rows=%d", tsv_path, len(rows))
 
     processed = 0
     skipped = 0
@@ -95,12 +114,20 @@ def enrich_optimized_tsv(
     for row in rows:
         if limit is not None and processed >= limit:
             skipped += 1
+            logger.debug("Skipping row because LLM limit reached word=%s limit=%s", row.get("Word"), limit)
             continue
         if not force and not _needs_enrichment(row):
             skipped += 1
+            logger.debug("Skipping row because LLM fields are already filled word=%s", row.get("Word"))
             continue
         try:
             analysis_key = row.get("Base form") or row.get("Word") or ""
+            logger.info(
+                "Enriching word with LLM word=%s base_form=%s occurrence_count=%s",
+                row.get("Word"),
+                row.get("Base form"),
+                row.get("Source occurrence count"),
+            )
             _emit_progress(
                 progress_callback,
                 {
@@ -126,8 +153,19 @@ def enrich_optimized_tsv(
                 },
             )
             processed += 1
+            logger.info(
+                "LLM enrichment succeeded word=%s base_form=%s score=%s",
+                row.get("Word"),
+                row.get("Base form"),
+                enrichment.get("importance_0_10"),
+            )
         except Exception as exc:
             failed += 1
+            logger.exception(
+                "LLM enrichment failed word=%s base_form=%s",
+                row.get("Word"),
+                row.get("Base form"),
+            )
             row["Tags"] = _append_tag(row.get("Tags", ""), "warn_llm_enrichment_failed")
             note = str(row.get("Importance note") or "").strip()
             suffix = f"LLM enrichment failed: {exc}"
@@ -143,7 +181,15 @@ def enrich_optimized_tsv(
             )
 
     _write_tsv_atomic(output, rows)
-    return LLMEnrichmentResult(tsv_path=output, processed=processed, skipped=skipped, failed=failed)
+    result = LLMEnrichmentResult(tsv_path=output, processed=processed, skipped=skipped, failed=failed)
+    logger.info(
+        "Finished LLM enrichment tsv=%s processed=%d skipped=%d failed=%d",
+        result.tsv_path,
+        result.processed,
+        result.skipped,
+        result.failed,
+    )
+    return result
 
 
 class DeepSeekVocabularyClient:
@@ -151,19 +197,34 @@ class DeepSeekVocabularyClient:
         try:
             from openai import OpenAI
         except ImportError as exc:
+            logger.exception("OpenAI SDK import failed")
             raise LLMEnrichmentError(
                 "The openai package is not installed. Reinstall the project dependencies first."
             ) from exc
 
         self.model = os.environ.get("DSLAB_MODEL", DEFAULT_DSLAB_MODEL)
         self.reasoning_effort = os.environ.get("DSLAB_REASONING_EFFORT", "high")
+        self.base_url = os.environ.get("DSLAB_BASE_URL", DEFAULT_DSLAB_BASE_URL)
         self.client = OpenAI(
             api_key=api_key,
-            base_url=os.environ.get("DSLAB_BASE_URL", DEFAULT_DSLAB_BASE_URL),
+            base_url=self.base_url,
             timeout=float(os.environ.get("DSLAB_TIMEOUT_SECONDS", "90")),
+        )
+        logger.info(
+            "Initialized DS Lab OpenAI-compatible client base_url=%s model=%s reasoning_effort=%s",
+            self.base_url,
+            self.model,
+            self.reasoning_effort,
         )
 
     def enrich(self, row: dict[str, str], analysis: dict[str, Any] | None) -> dict[str, Any]:
+        logger.debug(
+            "Sending LLM enrichment request model=%s word=%s base_form=%s has_analysis=%s",
+            self.model,
+            row.get("Word"),
+            row.get("Base form"),
+            analysis is not None,
+        )
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -178,9 +239,16 @@ class DeepSeekVocabularyClient:
         message = response.choices[0].message
         content = message.content or ""
         reasoning = getattr(message, "reasoning_content", "") or ""
+        logger.debug(
+            "Received LLM response word=%s content_chars=%d reasoning_chars=%d",
+            row.get("Word"),
+            len(content),
+            len(reasoning),
+        )
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as exc:
+            logger.exception("LLM returned invalid JSON word=%s content_excerpt=%s", row.get("Word"), content[:300])
             raise LLMEnrichmentError(f"model returned invalid JSON: {exc}") from exc
         enrichment = _validate_enrichment(parsed)
         enrichment["_reasoning_content"] = reasoning
@@ -241,6 +309,7 @@ def _prompt_payload(row: dict[str, str], analysis: dict[str, Any] | None) -> dic
 
 
 def _validate_enrichment(data: dict[str, Any]) -> dict[str, Any]:
+    logger.debug("Validating LLM enrichment keys=%s", sorted(data))
     required = {
         "word",
         "base_form",
@@ -253,9 +322,11 @@ def _validate_enrichment(data: dict[str, Any]) -> dict[str, Any]:
     }
     missing = sorted(required - set(data))
     if missing:
+        logger.warning("LLM enrichment JSON missing keys=%s", missing)
         raise LLMEnrichmentError(f"model JSON is missing keys: {', '.join(missing)}")
     score = int(data["importance_0_10"])
     if score < 0 or score > 10:
+        logger.warning("LLM enrichment score out of range score=%s", score)
         raise LLMEnrichmentError("importance_0_10 must be between 0 and 10")
     data["importance_0_10"] = score
     if isinstance(data["tags"], str):
@@ -281,16 +352,19 @@ def _needs_enrichment(row: dict[str, str]) -> bool:
 
 
 def _read_tsv(path: Path) -> list[dict[str, str]]:
+    logger.info("Reading optimized TSV path=%s", path)
     with path.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file, delimiter="\t")
         rows = [dict(row) for row in reader]
     for row in rows:
         for header in OPTIMIZED_TSV_HEADER:
             row.setdefault(header, "")
+    logger.info("Read optimized TSV path=%s rows=%d", path, len(rows))
     return rows
 
 
 def _write_tsv_atomic(path: Path, rows: list[dict[str, str]]) -> None:
+    logger.info("Writing enriched TSV atomically path=%s rows=%d", path, len(rows))
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w",
@@ -310,23 +384,29 @@ def _write_tsv_atomic(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
         temporary = Path(file.name)
     temporary.replace(path)
+    logger.info("Wrote enriched TSV path=%s rows=%d", path, len(rows))
 
 
 def _read_analysis(row: dict[str, str], analysis_dir: Path | None) -> dict[str, Any] | None:
     if analysis_dir is None:
+        logger.debug("No analysis dir configured for row word=%s", row.get("Word"))
         return None
     key = row.get("Base form") or row.get("Word") or ""
     path = analysis_dir / f"{_safe_analysis_name(key)}.json"
     if not path.exists():
+        logger.debug("Analysis JSON not found word=%s path=%s", row.get("Word"), path)
         return None
+    logger.debug("Reading analysis JSON word=%s path=%s", row.get("Word"), path)
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _write_analysis_enrichment(key: str, analysis_dir: Path | None, enrichment: dict[str, Any]) -> None:
     if analysis_dir is None:
+        logger.debug("No analysis dir configured; skipping LLM enrichment audit key=%s", key)
         return
     path = analysis_dir / f"{_safe_analysis_name(key)}.json"
     if not path.exists():
+        logger.debug("Analysis JSON missing; skipping LLM enrichment audit key=%s path=%s", key, path)
         return
     data = json.loads(path.read_text(encoding="utf-8"))
     data["llm_enrichment"] = {
@@ -335,6 +415,7 @@ def _write_analysis_enrichment(key: str, analysis_dir: Path | None, enrichment: 
         "reasoning_excerpt": _truncate(enrichment.get("_reasoning_content", ""), 1200),
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    logger.debug("Wrote LLM enrichment audit key=%s path=%s", key, path)
 
 
 def _safe_analysis_name(value: str) -> str:

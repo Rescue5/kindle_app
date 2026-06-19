@@ -14,9 +14,12 @@ from typing import Any
 from wordfreq import zipf_frequency
 
 from kindle_vocab_app.genre_config import ProcessingConfig, load_processing_config
+from kindle_vocab_app.logging_config import get_logger
 from kindle_vocab_app.processing_state import ProcessedSnapshot, utc_now
 from kindle_vocab_app.tsv_schema import OPTIMIZED_TSV_HEADER
 
+
+logger = get_logger(__name__)
 
 A1_AND_FUNCTION_WORDS = {
     "a",
@@ -190,6 +193,13 @@ def optimize_entries(
     *,
     config_path: Path | None = None,
 ) -> OptimizationResult:
+    logger.info(
+        "Starting vocabulary optimization entries=%d output_dir=%s snapshot_path=%s config_path=%s",
+        len(entries),
+        output_dir,
+        snapshot_path,
+        config_path,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     analysis_dir = output_dir / "word_analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
@@ -203,6 +213,7 @@ def optimize_entries(
 
     candidates = [_candidate_from_entry(entry) for entry in entries]
     candidates = [candidate for candidate in candidates if candidate is not None]
+    logger.info("Built optimization candidates total_entries=%d candidates=%d", len(entries), len(candidates))
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for candidate in candidates:
@@ -219,12 +230,28 @@ def optimize_entries(
     for lexical_key, group in sorted(grouped.items()):
         if snapshot.has_processed(lexical_key):
             skipped_existing += 1
+            logger.debug("Skipping already processed lexical_key=%s occurrences=%d", lexical_key, len(group))
             continue
 
         analysis = _analyze_group(lexical_key, group, config)
         analyses.append(analysis)
         if not analysis["accepted"]:
             rejected_new += 1
+            logger.debug(
+                "Rejected lexical item lexical_key=%s word=%s score=%s warnings=%s",
+                lexical_key,
+                analysis["word"],
+                analysis["importance"]["score"],
+                sorted(analysis["warnings"]),
+            )
+        else:
+            logger.debug(
+                "Accepted lexical item lexical_key=%s word=%s score=%s occurrences=%d",
+                lexical_key,
+                analysis["word"],
+                analysis["importance"]["score"],
+                analysis["source_occurrence_count"],
+            )
         snapshot.remember_processed(
             lexical_key,
             {
@@ -242,7 +269,7 @@ def optimize_entries(
         _write_optimized_tsv(tsv_path, accepted)
     snapshot.save()
 
-    return OptimizationResult(
+    result = OptimizationResult(
         output_dir=output_dir,
         tsv_path=tsv_path,
         analysis_dir=analysis_dir,
@@ -252,9 +279,20 @@ def optimize_entries(
         skipped_existing=skipped_existing,
         rejected_new=rejected_new,
     )
+    logger.info(
+        "Finished vocabulary optimization processed_new=%d accepted_new=%d rejected_new=%d skipped_existing=%d tsv=%s analysis_dir=%s",
+        result.processed_new,
+        result.accepted_new,
+        result.rejected_new,
+        result.skipped_existing,
+        result.tsv_path,
+        result.analysis_dir,
+    )
+    return result
 
 
 def seed_snapshot_from_optimized_tsv(snapshot_path: Path, tsv_path: Path) -> int:
+    logger.info("Seeding processed snapshot from optimized TSV snapshot=%s tsv=%s", snapshot_path, tsv_path)
     snapshot = ProcessedSnapshot.load(snapshot_path)
     added = 0
     with tsv_path.open("r", encoding="utf-8-sig", newline="") as file:
@@ -276,6 +314,7 @@ def seed_snapshot_from_optimized_tsv(snapshot_path: Path, tsv_path: Path) -> int
             )
             added += 1
     snapshot.save()
+    logger.info("Seeded processed snapshot from optimized TSV added=%d snapshot=%s", added, snapshot_path)
     return added
 
 
@@ -292,6 +331,7 @@ def _candidate_from_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
     context = str(entry.get("context") or "")
     normalized = normalize_word(raw_word)
     if not normalized:
+        logger.debug("Skipping entry with empty normalized word raw_word=%r", raw_word)
         return None
 
     phrasal = detect_phrasal_expression(normalized, context)
@@ -389,6 +429,7 @@ def _analyze_group(
     group: list[dict[str, Any]],
     config: ProcessingConfig,
 ) -> dict[str, Any]:
+    logger.debug("Analyzing lexical group lexical_key=%s occurrences=%d", lexical_key, len(group))
     representative = _choose_representative(group)
     entry = representative["entry"]
     word = str(representative["normalized_word"])
@@ -421,7 +462,7 @@ def _analyze_group(
     occurrence_count = len(group)
     source_forms = sorted({str(item["entry"].get("word") or item["normalized_word"]) for item in group})
 
-    return {
+    analysis = {
         "schema_version": 1,
         "processed_at": utc_now(),
         "accepted": accepted,
@@ -455,6 +496,17 @@ def _analyze_group(
             entry=entry,
         ),
     }
+    logger.debug(
+        "Analyzed lexical group lexical_key=%s word=%s base_form=%s pos=%s score=%s accepted=%s warnings=%s",
+        lexical_key,
+        word,
+        base_form,
+        pos,
+        score,
+        accepted,
+        sorted(warnings),
+    )
+    return analysis
 
 
 def wordnet_features(base_form: str, pos: str, context: str) -> dict[str, Any]:
@@ -479,6 +531,12 @@ def wordnet_features(base_form: str, pos: str, context: str) -> dict[str, Any]:
             "sample_definitions": definitions,
         }
     except Exception as exc:
+        logger.debug(
+            "WordNet feature extraction failed base_form=%s pos=%s error=%s",
+            base_form,
+            pos,
+            exc,
+        )
         return {
             "available": False,
             "error": str(exc),
@@ -726,17 +784,20 @@ def source_tag(title: str) -> str:
 
 
 def _write_optimized_tsv(path: Path, analyses: list[dict[str, Any]]) -> None:
+    logger.info("Writing optimized TSV path=%s rows=%d", path, len(analyses))
     with path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=OPTIMIZED_TSV_HEADER, delimiter="\t")
         writer.writeheader()
         for analysis in analyses:
             writer.writerow(analysis["tsv_row"])
+    logger.info("Wrote optimized TSV path=%s rows=%d", path, len(analyses))
 
 
 def _write_analysis_json(output_dir: Path, lexical_key: str, analysis: dict[str, Any]) -> None:
     safe_name = re.sub(r"[^a-z0-9._-]+", "_", lexical_key.casefold()).strip("_") or "word"
     path = output_dir / f"{safe_name}.json"
     path.write_text(json.dumps(analysis, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    logger.debug("Wrote word analysis JSON lexical_key=%s path=%s", lexical_key, path)
 
 
 def _choose_representative(group: list[dict[str, Any]]) -> dict[str, Any]:

@@ -10,11 +10,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kindle_vocab_app.logging_config import get_logger
+
 
 VOCAB_RELATIVE_PATHS = (
     Path("system") / "vocabulary" / "vocab.db",
     Path("Kindle") / "system" / "vocabulary" / "vocab.db",
 )
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -25,6 +29,12 @@ class KindleVocabSource:
     shell_item: Any | None = None
 
     def copy_to_cache(self, cache_dir: Path) -> Path:
+        logger.info(
+            "Copying Kindle vocab source to cache label=%s cache_dir=%s source_type=%s",
+            self.label,
+            cache_dir,
+            "mtp" if self.shell_item is not None else "path",
+        )
         if self.shell_item is not None:
             return _copy_shell_item(self.shell_item, cache_dir)
         if self.path is None:
@@ -33,25 +43,35 @@ class KindleVocabSource:
 
 
 def find_kindle_source(roots: Iterable[Path] | None = None) -> KindleVocabSource | None:
+    logger.info(
+        "Searching for Kindle source roots=%s platform=%s",
+        "<auto>" if roots is None else list(roots),
+        sys.platform,
+    )
     if sys.platform == "win32" and roots is None:
         mtp_source = _find_windows_mtp_vocab()
         if mtp_source is not None:
+            logger.info("Found Kindle source through Windows MTP label=%s", mtp_source.label)
             return mtp_source
 
     path = find_kindle_vocab(roots)
     if path is None:
+        logger.info("No Kindle vocab source found")
         return None
     stat = path.stat()
     volume = path.parents[2]
     label = volume.name or volume.anchor or "USB"
-    return KindleVocabSource(
+    source = KindleVocabSource(
         label=f"Kindle · {label}",
         signature=(str(path), str(stat.st_size), str(stat.st_mtime_ns)),
         path=path,
     )
+    logger.info("Found Kindle source path=%s label=%s size=%s", path, source.label, stat.st_size)
+    return source
 
 
 def mounted_volume_roots() -> list[Path]:
+    logger.debug("Collecting mounted volume roots platform=%s", sys.platform)
     if sys.platform == "win32":
         return _windows_volume_roots()
 
@@ -65,23 +85,30 @@ def mounted_volume_roots() -> list[Path]:
             roots.extend(_children(Path("/run/media") / user))
         roots.extend(_children(Path("/media")))
         roots.extend(_children(Path("/mnt")))
-    return _unique_existing(roots)
+    unique = _unique_existing(roots)
+    logger.debug("Mounted volume roots count=%d roots=%s", len(unique), unique)
+    return unique
 
 
 def find_kindle_vocab(roots: Iterable[Path] | None = None) -> Path | None:
     candidates = list(roots) if roots is not None else mounted_volume_roots()
+    logger.debug("Scanning Kindle vocab candidates count=%d", len(candidates))
     for root in _unique_existing(candidates):
         for relative_path in VOCAB_RELATIVE_PATHS:
             vocab_path = root / relative_path
             try:
                 if vocab_path.is_file():
+                    logger.info("Found Kindle vocab file path=%s", vocab_path)
                     return vocab_path
-            except OSError:
+            except OSError as exc:
+                logger.debug("Cannot inspect Kindle vocab candidate path=%s error=%s", vocab_path, exc)
                 continue
+    logger.debug("Kindle vocab file not found in candidates")
     return None
 
 
 def cache_vocab_database(source: Path, cache_dir: Path) -> Path:
+    logger.info("Caching Kindle database source=%s cache_dir=%s", source, cache_dir)
     return _copy_path(source, cache_dir)
 
 
@@ -91,6 +118,7 @@ def file_signature(path: Path) -> tuple[int, int]:
 
 
 def _find_windows_mtp_vocab() -> KindleVocabSource | None:
+    logger.debug("Searching Windows MTP devices for Kindle vocab")
     try:
         import pythoncom
         import win32com.client
@@ -110,12 +138,20 @@ def _find_windows_mtp_vocab() -> KindleVocabSource | None:
             parent_folder, item = vocab
             size = str(parent_folder.GetDetailsOf(item, 2) or "")
             modified = str(parent_folder.GetDetailsOf(item, 3) or "")
-            return KindleVocabSource(
+            source = KindleVocabSource(
                 label=f"Kindle · {device.Name}",
                 signature=(str(device.Path), str(item.Path), size, modified),
                 shell_item=item,
             )
-    except (ImportError, OSError, AttributeError):
+            logger.info(
+                "Found Windows MTP Kindle source label=%s size=%s modified=%s",
+                source.label,
+                size,
+                modified,
+            )
+            return source
+    except (ImportError, OSError, AttributeError) as exc:
+        logger.debug("Windows MTP search unavailable or failed error=%s", exc)
         return None
     return None
 
@@ -150,6 +186,7 @@ def _shell_items(items: Any) -> list[Any]:
 
 
 def _copy_shell_item(shell_item: Any, cache_dir: Path) -> Path:
+    logger.info("Copying Windows MTP shell item to cache cache_dir=%s", cache_dir)
     import pythoncom
     import win32com.client
 
@@ -181,6 +218,7 @@ def _copy_shell_item(shell_item: Any, cache_dir: Path) -> Path:
         time.sleep(0.1)
 
     if copied is None:
+        logger.error("Timed out copying Windows MTP vocab.db cache_dir=%s", cache_dir)
         raise TimeoutError("Windows did not finish copying vocab.db from Kindle")
 
     target = cache_dir / "vocab.db"
@@ -188,15 +226,18 @@ def _copy_shell_item(shell_item: Any, cache_dir: Path) -> Path:
     shutil.copy2(copied, temporary)
     temporary.replace(target)
     shutil.rmtree(staging_dir, ignore_errors=True)
+    logger.info("Copied Windows MTP vocab.db to cache target=%s size=%d", target, target.stat().st_size)
     return target
 
 
 def _copy_path(source: Path, cache_dir: Path) -> Path:
+    logger.info("Copying vocab.db path source=%s cache_dir=%s", source, cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     target = cache_dir / "vocab.db"
     temporary = cache_dir / "vocab.db.tmp"
     shutil.copy2(source, temporary)
     temporary.replace(target)
+    logger.info("Copied vocab.db to cache target=%s size=%d", target, target.stat().st_size)
     return target
 
 

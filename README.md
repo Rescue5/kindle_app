@@ -33,13 +33,50 @@ Features:
 - selecting a specific book;
 - searching across words, contexts, and book metadata;
 - previewing words and contexts;
-- exporting the current filtered selection to Anki or Quizlet.
+- exporting the current filtered selection to Anki or Quizlet;
+- optimizing only previously unseen words into `optimized.tsv` plus per-word
+  JSON analysis files.
 
 The application checks for newly connected devices every three seconds. On
 Windows it supports both ordinary drive letters and Kindle devices shown in
 Explorer as `This PC > Kindle` through MTP/WPD. It also supports macOS
 `/Volumes` and common Linux mount locations under `/media`, `/run/media`, and
 `/mnt`.
+
+## Optimized Export
+
+The optimizer keeps a local `processed_snapshot.json` so already processed
+lemmas and phrases are not processed again. It writes:
+
+- `optimized.tsv`: same columns as the existing optimized Anki template;
+- `word_analysis/*.json`: detailed deterministic scoring audit per new word.
+
+Translations and generated example sentences are intentionally left blank for a
+later model step.
+
+The scoring uses local deterministic signals: normalization, context-aware
+POS tagging when NLTK data is available, WordNet lemmatization and Lesk sense
+selection, `wordfreq` Zipf frequencies, simple proper-noun and OCR/noise
+checks, phrase detection, and optional book genre preferences from
+`kindle_vocab_app/config/processing.toml`.
+
+CLI usage:
+
+```powershell
+kindle-vocab-optimize .\vocab.db .\.app-data\optimized
+```
+
+To seed the snapshot from an existing optimized TSV:
+
+```powershell
+kindle-vocab-optimize .\vocab.db .\.app-data\optimized --seed-optimized-tsv C:\path\to\kindle_anki_optimized.tsv
+```
+
+For best offline WordNet/POS behavior, install NLTK resources once:
+
+```powershell
+python -m nltk.downloader -q wordnet omw-1.4 averaged_perceptron_tagger_eng punkt_tab
+```
 
 ## Export for Anki
 

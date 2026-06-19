@@ -1,0 +1,12 @@
+# Preferred categories are optional boosts for genre-specific reading.
+# They do not infer book genre by title. Add exact book mappings below.
+preferred_categories = [
+  "fantasy",
+  "military",
+  "mythology",
+  "horror",
+  "anatomy",
+]
+
+[book_genres]
+# "Exact Kindle book title" = ["fantasy", "horror"]

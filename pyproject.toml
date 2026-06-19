@@ -11,10 +11,13 @@ requires-python = ">=3.11"
 dependencies = [
     "PySide6>=6.8,<7",
     "pywin32>=311; sys_platform == 'win32'",
+    "nltk>=3.9,<4",
+    "wordfreq>=3.1,<4",
+    "wordninja>=2,<3",
 ]
 
 [tool.setuptools.package-data]
-kindle_vocab_app = ["assets/icons/*.svg"]
+kindle_vocab_app = ["assets/icons/*.svg", "config/*.toml"]
 
 [project.optional-dependencies]
 dev = [
@@ -24,6 +27,7 @@ dev = [
 
 [project.scripts]
 kindle-vocab-app = "kindle_vocab_app.app:main"
+kindle-vocab-optimize = "kindle_vocab_app.optimizer_cli:main"
 
 [tool.ruff]
 line-length = 100

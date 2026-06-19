@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from kindle_vocab_app.kindle_db import export_entries, fetch_entries, list_books, validate_vocab_db
 from kindle_vocab_app.kindle_device import find_kindle_source
+from kindle_vocab_app.vocab_optimizer import optimize_entries
 
 
 COLORS = {
@@ -302,6 +303,22 @@ class MainWindow(QMainWindow):
         self.export_hint.setObjectName("subtleLabel")
         self.export_hint.setWordWrap(True)
         layout.addWidget(self.export_hint)
+
+        layout.addSpacing(10)
+        layout.addWidget(self._section_label("ОБРАБОТКА"))
+
+        self.optimize_button = QPushButton("  Обработать новые")
+        self.optimize_button.setIcon(lucide_icon("sparkles", "#f4c86a", 18))
+        self.optimize_button.setIconSize(QSize(17, 17))
+        self.optimize_button.setEnabled(False)
+        self.optimize_button.setToolTip("Создать optimized.tsv и JSON-аудит только для новых слов")
+        self.optimize_button.clicked.connect(self.optimize_current)
+        layout.addWidget(self.optimize_button)
+
+        self.optimize_hint = QLabel("Слепок обработанных слов хранится локально")
+        self.optimize_hint.setObjectName("subtleLabel")
+        self.optimize_hint.setWordWrap(True)
+        layout.addWidget(self.optimize_hint)
         layout.addStretch()
 
         location_hint = QLabel("Kindle/system/vocabulary/vocab.db")
@@ -485,8 +502,20 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _cache_dir() -> Path:
+        return MainWindow._app_data_dir() / "cache"
+
+    @staticmethod
+    def _processing_dir() -> Path:
+        return MainWindow._app_data_dir() / "optimized"
+
+    @staticmethod
+    def _snapshot_path() -> Path:
+        return MainWindow._app_data_dir() / "processed_snapshot.json"
+
+    @staticmethod
+    def _app_data_dir() -> Path:
         app_data = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
-        return Path(app_data) / "cache"
+        return Path(app_data)
 
     def load_database(
         self,
@@ -527,6 +556,7 @@ class MainWindow(QMainWindow):
         self.search_input.setEnabled(True)
         self.anki_button.setEnabled(True)
         self.quizlet_button.setEnabled(True)
+        self.optimize_button.setEnabled(True)
         self.books_metric[1].setText(str(self.book_count))
         self.search_input.clear()
         self.refresh_entries()
@@ -557,6 +587,7 @@ class MainWindow(QMainWindow):
         self.export_hint.setText(f"Будет экспортировано: {count}")
         self.anki_button.setEnabled(count > 0)
         self.quizlet_button.setEnabled(count > 0)
+        self.optimize_button.setEnabled(count > 0)
         self._fill_table()
 
     def _fill_table(self) -> None:
@@ -604,6 +635,42 @@ class MainWindow(QMainWindow):
 
         self.file_status_label.setText(f"Сохранено {len(self.filtered_entries)} записей")
         self.file_status_label.setToolTip(str(output))
+
+    def optimize_current(self) -> None:
+        if not self.filtered_entries:
+            QMessageBox.information(self, "Нет данных", "В текущей выборке нет записей.")
+            return
+
+        try:
+            result = optimize_entries(
+                self.filtered_entries,
+                self._processing_dir(),
+                self._snapshot_path(),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка обработки", str(exc))
+            return
+
+        self.optimize_hint.setText(
+            f"Новых: {result.processed_new}, в TSV: {result.accepted_new}, "
+            f"пропущено: {result.skipped_existing}"
+        )
+        self.file_status_label.setText(f"Оптимизировано новых слов: {result.accepted_new}")
+        self.file_status_label.setToolTip(str(result.tsv_path))
+        QMessageBox.information(
+            self,
+            "Обработка завершена",
+            "\n".join(
+                [
+                    f"Новых слов обработано: {result.processed_new}",
+                    f"Добавлено в TSV: {result.accepted_new}",
+                    f"Отклонено фильтрами: {result.rejected_new}",
+                    f"Уже были в слепке: {result.skipped_existing}",
+                    f"TSV: {result.tsv_path}",
+                    f"JSON: {result.analysis_dir}",
+                ]
+            ),
+        )
 
 
 def _dark_palette() -> QPalette:

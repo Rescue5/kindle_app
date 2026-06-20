@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -65,11 +66,12 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
             "skipped_existing": result.skipped_existing,
             "rejected_new": result.rejected_new,
             "tsv_path": str(result.tsv_path),
+            "entry_updates": _entry_updates_from_analysis(result.analysis_dir, entries, str(result.tsv_path)),
             "events": [
                 {
                     "phase": "answered",
-                    "title": "Local optimizer",
-                    "message": f"Accepted {result.accepted_new} new cards from {result.processed_new} processed words.",
+                    "title": "Offline optimizer",
+                    "message": f"Processed {result.processed_new}; accepted {result.accepted_new}; rejected {result.rejected_new}; skipped {result.skipped_existing}.",
                     "meta": "Python",
                 }
             ],
@@ -121,7 +123,7 @@ def load_database_state(db_path: Path, source_label: str) -> dict[str, Any]:
 
 
 def _entry_for_frontend(entry: dict[str, object]) -> dict[str, str]:
-    return {
+    payload = {
         "word": str(entry.get("word") or ""),
         "stem": str(entry.get("stem") or ""),
         "context": str(entry.get("context") or ""),
@@ -130,10 +132,131 @@ def _entry_for_frontend(entry: dict[str, object]) -> dict[str, str]:
         "authors": str(entry.get("authors") or ""),
         "language": str(entry.get("language") or ""),
         "looked_up_at": str(entry.get("looked_up_at") or "").split("T", maxsplit=1)[0],
+        "processing_status": "raw",
+        "export_status": "none",
     }
+    payload["id"] = _entry_id(payload)
+    return payload
+
+
+def _entry_id(entry: dict[str, object]) -> str:
+    raw = "|".join(
+        str(entry.get(key) or "")
+        for key in ["word", "stem", "context", "book_key", "book_title", "looked_up_at"]
+    )
+    return hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _entry_updates_from_analysis(
+    analysis_dir: Path,
+    submitted_entries: list[object],
+    tsv_path: str,
+) -> list[dict[str, Any]]:
+    updates: list[dict[str, Any]] = []
+    submitted_ids = {
+        str(entry.get("id") or _entry_id(entry))
+        for entry in submitted_entries
+        if isinstance(entry, dict)
+    }
+    for path in sorted(analysis_dir.glob("*.json")):
+        try:
+            analysis = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.exception("Failed to read analysis JSON path=%s", path)
+            continue
+
+        entry = dict(analysis.get("representative_entry") or {})
+        entry_id = str(entry.get("id") or _entry_id(entry))
+        if entry_id not in submitted_ids:
+            continue
+        importance = dict(analysis.get("importance") or {})
+        frequencies = dict(analysis.get("frequencies") or {})
+        warnings = dict(analysis.get("warnings") or {})
+        accepted = bool(analysis.get("accepted"))
+        updates.append(
+            {
+                "id": entry_id,
+                "processing_status": "processed" if accepted else "rejected",
+                "analysis": {
+                    "base_form": str(analysis.get("base_form") or entry.get("stem") or entry.get("word") or ""),
+                    "pos": str(analysis.get("pos") or ""),
+                    "accepted": accepted,
+                    "importance_score": importance.get("score"),
+                    "importance_note": str(importance.get("note") or ""),
+                    "frequency_note": _frequency_note(frequencies),
+                    "warnings": sorted(warnings),
+                    "source_occurrence_count": analysis.get("source_occurrence_count"),
+                    "processed_at": str(analysis.get("processed_at") or ""),
+                    "translation_status": "offline_only",
+                    "tsv_path": tsv_path,
+                },
+            }
+        )
+
+    if updates:
+        return updates
+
+    return [
+        {
+            "id": str(entry.get("id") or _entry_id(entry)),
+            "processing_status": "skipped",
+            "analysis": {
+                "base_form": str(entry.get("stem") or entry.get("word") or ""),
+                "accepted": True,
+                "importance_note": "уже есть в processed snapshot",
+                "translation_status": "offline_only",
+                "tsv_path": tsv_path,
+            },
+        }
+        for entry in submitted_entries
+        if isinstance(entry, dict)
+    ]
+
+
+def _frequency_note(frequencies: dict[str, Any]) -> str:
+    lemma = frequencies.get("lemma_zipf")
+    form = frequencies.get("form_zipf")
+    parts = []
+    if lemma is not None:
+        parts.append(f"lemma Zipf {lemma}")
+    if form is not None:
+        parts.append(f"form Zipf {form}")
+    return ", ".join(parts)
 
 
 def demo_state(source_name: str = "Demo Kindle", source_status: str = "Preview data loaded") -> dict[str, Any]:
+    entries = [
+        {
+            "word": "afraid",
+            "stem": "afraid",
+            "context": "She was afraid to open the old door.",
+            "book_key": "The Night Reader",
+            "book_title": "The Night Reader",
+            "authors": "Demo Library",
+            "language": "en",
+            "looked_up_at": "2026-06-19",
+        },
+        {
+            "word": "glimpse",
+            "stem": "glimpse",
+            "context": "For a moment he caught a glimpse of the city below.",
+            "book_key": "The Night Reader",
+            "book_title": "The Night Reader",
+            "authors": "Demo Library",
+            "language": "en",
+            "looked_up_at": "2026-06-18",
+        },
+        {
+            "word": "dread",
+            "stem": "dread",
+            "context": "A quiet dread settled over the room.",
+            "book_key": "Shadows and Signals",
+            "book_title": "Shadows and Signals",
+            "authors": "Demo Library",
+            "language": "en",
+            "looked_up_at": "2026-06-17",
+        },
+    ]
     return {
         "sourceName": source_name,
         "sourceStatus": source_status,
@@ -142,38 +265,7 @@ def demo_state(source_name: str = "Demo Kindle", source_status: str = "Preview d
             {"label": "The Night Reader · Demo Library · 2", "key": "The Night Reader"},
             {"label": "Shadows and Signals · Demo Library · 1", "key": "Shadows and Signals"},
         ],
-        "entries": [
-            {
-                "word": "afraid",
-                "stem": "afraid",
-                "context": "She was afraid to open the old door.",
-                "book_key": "The Night Reader",
-                "book_title": "The Night Reader",
-                "authors": "Demo Library",
-                "language": "en",
-                "looked_up_at": "2026-06-19",
-            },
-            {
-                "word": "glimpse",
-                "stem": "glimpse",
-                "context": "For a moment he caught a glimpse of the city below.",
-                "book_key": "The Night Reader",
-                "book_title": "The Night Reader",
-                "authors": "Demo Library",
-                "language": "en",
-                "looked_up_at": "2026-06-18",
-            },
-            {
-                "word": "dread",
-                "stem": "dread",
-                "context": "A quiet dread settled over the room.",
-                "book_key": "Shadows and Signals",
-                "book_title": "Shadows and Signals",
-                "authors": "Demo Library",
-                "language": "en",
-                "looked_up_at": "2026-06-17",
-            },
-        ],
+        "entries": [_entry_for_frontend(entry) for entry in entries],
     }
 
 

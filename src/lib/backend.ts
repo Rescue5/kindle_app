@@ -1,8 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ActivityEvent, AppState, BookOption, VocabEntry } from "@/types";
 
+function rawEntry(entry: Omit<VocabEntry, "id" | "processing_status" | "export_status">): VocabEntry {
+  const id = [entry.word, entry.book_key, entry.looked_up_at, entry.context].join("|");
+  return {
+    ...entry,
+    id,
+    processing_status: "raw",
+    export_status: "none",
+  };
+}
+
 const demoEntries: VocabEntry[] = [
-  {
+  rawEntry({
     word: "afraid",
     stem: "afraid",
     context: "She was afraid to open the old door.",
@@ -11,8 +21,8 @@ const demoEntries: VocabEntry[] = [
     authors: "Demo Library",
     language: "en",
     looked_up_at: "2026-06-19",
-  },
-  {
+  }),
+  rawEntry({
     word: "glimpse",
     stem: "glimpse",
     context: "For a moment he caught a glimpse of the city below.",
@@ -21,8 +31,8 @@ const demoEntries: VocabEntry[] = [
     authors: "Demo Library",
     language: "en",
     looked_up_at: "2026-06-18",
-  },
-  {
+  }),
+  rawEntry({
     word: "dread",
     stem: "dread",
     context: "A quiet dread settled over the room.",
@@ -31,8 +41,8 @@ const demoEntries: VocabEntry[] = [
     authors: "Demo Library",
     language: "en",
     looked_up_at: "2026-06-17",
-  },
-  {
+  }),
+  rawEntry({
     word: "submerge",
     stem: "submerge",
     context: "He tried to submerge the memory before it surfaced again.",
@@ -41,8 +51,8 @@ const demoEntries: VocabEntry[] = [
     authors: "Demo Library",
     language: "en",
     looked_up_at: "2026-06-17",
-  },
-  {
+  }),
+  rawEntry({
     word: "resilient",
     stem: "resilient",
     context: "Her resilient spirit never broke.",
@@ -51,8 +61,8 @@ const demoEntries: VocabEntry[] = [
     authors: "Demo Library",
     language: "en",
     looked_up_at: "2026-06-16",
-  },
-  {
+  }),
+  rawEntry({
     word: "vigilant",
     stem: "vigilant",
     context: "They remained vigilant through the night.",
@@ -61,8 +71,8 @@ const demoEntries: VocabEntry[] = [
     authors: "Demo Library",
     language: "en",
     looked_up_at: "2026-06-15",
-  },
-  {
+  }),
+  rawEntry({
     word: "faint",
     stem: "faint",
     context: "A faint glow lit the corridor.",
@@ -71,8 +81,8 @@ const demoEntries: VocabEntry[] = [
     authors: "Demo Library",
     language: "en",
     looked_up_at: "2026-06-15",
-  },
-  {
+  }),
+  rawEntry({
     word: "meticulous",
     stem: "meticulous",
     context: "He kept meticulous notes in the margin.",
@@ -81,7 +91,7 @@ const demoEntries: VocabEntry[] = [
     authors: "Demo Library",
     language: "en",
     looked_up_at: "2026-06-14",
-  },
+  }),
 ];
 
 const demoBooks: BookOption[] = [
@@ -94,14 +104,8 @@ const demoEvents: ActivityEvent[] = [
   {
     phase: "ready",
     title: "Ожидание Kindle",
-    message: "Можно подключить устройство или открыть preview-набор для проверки интерфейса.",
+    message: "Подключите Kindle или используйте preview-данные. Слова остаются необработанными до offline-обработки.",
     meta: "Готово",
-  },
-  {
-    phase: "answered",
-    title: "Конвейер готов",
-    message: "Этапы обработки показывают фактические результаты: лемму, сложность, смысл и экспорт.",
-    meta: "Система",
   },
 ];
 
@@ -132,7 +136,7 @@ async function mockBackend<T>(action: string, payload: unknown): Promise<T> {
       sourceName: action === "scan" ? "Demo Kindle Paperwhite" : "Demo Kindle",
       sourceStatus: "Preview-словарь загружен",
       books: demoBooks,
-      entries: demoEntries,
+      entries: demoEntries.map((entry) => ({ ...entry, processing_status: "raw", analysis: undefined })),
     } as T;
   }
   if (action === "optimize") {
@@ -141,19 +145,30 @@ async function mockBackend<T>(action: string, payload: unknown): Promise<T> {
       accepted_new: entries.length,
       processed_new: entries.length,
       skipped_existing: 0,
+      rejected_new: 0,
       tsv_path: "preview/optimized.tsv",
+      entry_updates: entries.map((entry) => ({
+        id: entry.id,
+        processing_status: "processed",
+        analysis: {
+          base_form: entry.stem || entry.word,
+          pos: "offline",
+          accepted: true,
+          importance_score: Math.max(2, Math.min(8, Math.round(entry.word.length * 0.7))),
+          importance_note: "оценено локальными правилами",
+          frequency_note: "offline-анализ без перевода",
+          warnings: [],
+          source_occurrence_count: 1,
+          translation_status: "offline_only",
+          tsv_path: "preview/optimized.tsv",
+        },
+      })),
       events: [
         {
-          phase: "thinking",
-          title: "afraid",
-          message: "Контекст указывает на эмоциональное состояние, а не на физическую опасность.",
-          meta: "Анализ",
-        },
-        {
           phase: "answered",
-          title: "glimpse",
-          message: "Значение отличается от буквального «взгляд»: кратковременное восприятие.",
-          meta: "B1+",
+          title: "Offline processing",
+          message: `${entries.length} слов получили локальную оценку сложности и базовую форму.`,
+          meta: "Python",
         },
       ],
     } as T;

@@ -5,10 +5,6 @@ description = "Premium Kindle Vocabulary Builder desktop app"
 authors = ["Kindle Cards"]
 edition = "2021"
 
-[lib]
-name = "kindle_cards_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

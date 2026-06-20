@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any
 
 from kindle_vocab_app.kindle_db import export_entries, fetch_entries, list_books, validate_vocab_db
@@ -16,7 +16,8 @@ logger = get_logger(__name__)
 
 
 def main() -> int:
-    workspace = Path.cwd()
+    _configure_stdio()
+    workspace = _workspace_root()
     configure_logging(workspace / ".app-data" / "tauri-logs", console=True)
     try:
         request = json.loads(sys.stdin.read() or "{}")
@@ -24,11 +25,11 @@ def main() -> int:
         payload = dict(request.get("payload") or {})
         logger.info("Tauri bridge request action=%s payload_keys=%s", action, sorted(payload))
         result = dispatch(action, payload, workspace)
-        print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
+        _write_response({"ok": True, "result": result})
         return 0
     except Exception as exc:
         logger.exception("Tauri bridge request failed")
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        _write_response({"ok": False, "error": str(exc)})
         return 1
 
 
@@ -40,7 +41,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         if source is None:
             return demo_state(
                 source_name="Kindle не найден",
-                source_status="Подключите Kindle или выберите vocab.db в будущей версии диалога.",
+                source_status="Подключите Kindle по USB. Пока показаны демонстрационные слова.",
             )
         cache_dir = workspace / ".app-data" / "cache"
         db_path = source.copy_to_cache(cache_dir)
@@ -75,6 +76,31 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         }
 
     raise ValueError(f"Unsupported bridge action: {action}")
+
+
+def _configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
+def _write_response(payload: dict[str, Any]) -> None:
+    text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    sys.stdout.write(text)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def _workspace_root() -> Path:
+    env_root = os.environ.get("KINDLE_CARDS_WORKSPACE")
+    if env_root:
+        return Path(env_root).resolve()
+    current = Path.cwd().resolve()
+    for candidate in [current, *current.parents]:
+        if (candidate / "pyproject.toml").exists() and (candidate / "package.json").exists():
+            return candidate
+    return current
 
 
 def load_database_state(db_path: Path, source_label: str) -> dict[str, Any]:

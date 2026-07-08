@@ -91,4 +91,9 @@
     background: hsl(var(--line));
     border-radius: 999px;
   }
+
+  .vocab-row {
+    content-visibility: auto;
+    contain-intrinsic-size: 45px;
+  }
 }

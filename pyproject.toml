@@ -17,6 +17,9 @@ dependencies = [
     "wordninja>=2,<3",
 ]
 
+[tool.setuptools.packages.find]
+include = ["kindle_vocab_app", "kindle_vocab_app.*"]
+
 [tool.setuptools.package-data]
 kindle_vocab_app = ["assets/icons/*.svg", "config/*.toml"]
 
@@ -28,6 +31,7 @@ dev = [
 
 [project.scripts]
 kindle-vocab-app = "kindle_vocab_app.app:main"
+kindle-vocab-doctor = "kindle_vocab_app.doctor:main"
 kindle-vocab-optimize = "kindle_vocab_app.optimizer_cli:main"
 
 [tool.ruff]

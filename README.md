@@ -1,4 +1,4 @@
-# Kindle Vocabulary Builder Export
+# Kindle Vocabulary Builder
 
 Kindle Vocabulary Builder stores looked-up words in an SQLite database named
 `vocab.db`. On Kindle e-ink devices connected by USB it is usually here:
@@ -7,21 +7,99 @@ Kindle Vocabulary Builder stores looked-up words in an SQLite database named
 Kindle/system/vocabulary/vocab.db
 ```
 
-The `system` folder may be hidden. Copy `vocab.db` from the Kindle to your
-computer first, then run the exporter against the copy.
+The `system` folder may be hidden. The desktop app can copy this database from a
+connected Kindle into a local cache automatically.
 
-## Desktop application
+## Fresh clone setup
 
-Install the app into the conda environment, then run:
+Prerequisites:
+
+- Miniconda or Anaconda.
+- WebView2 Runtime on Windows. It is usually already installed on modern
+  Windows systems.
+
+Fast setup from the repository root:
 
 ```powershell
+.\scripts\setup-dev.ps1
 conda activate kindle_app
-npm install
 kindle-vocab-app
 ```
 
+On macOS/Linux, use:
+
+```bash
+bash scripts/setup-dev.sh
+conda activate kindle_app
+kindle-vocab-app
+```
+
+Manual setup, if you do not want to run the script:
+
+```powershell
+conda env create -f environment.yml
+conda activate kindle_app
+python -m pip install -e .
+npm install
+npm rebuild esbuild
+python -c "import nltk; [nltk.download(package, quiet=True) for package in ('wordnet', 'omw-1.4', 'averaged_perceptron_tagger_eng', 'punkt_tab')]"
+kindle-vocab-doctor
+kindle-vocab-app
+```
+
+`environment.yml` installs Python, Node.js, and Rust/Cargo into the conda
+environment. If `kindle-vocab-doctor` reports that `cargo` is missing, rerun
+`.\scripts\setup-dev.ps1` so the environment is updated from the current file.
+
+If you see this error:
+
+```text
+ModuleNotFoundError: No module named 'kindle_vocab_app'
+```
+
+the Python package is not installed in the active environment. Run this from the
+repository root:
+
+```powershell
+conda activate kindle_app
+python -m pip uninstall -y kindle-vocab-app
+python -m pip install -e .
+```
+
+Then verify the package is importable:
+
+```powershell
+python -c "import kindle_vocab_app; print(kindle_vocab_app.__file__)"
+```
+
+## Runtime diagnostics
+
+Run this when setup succeeds but the app still does not start:
+
+```powershell
+conda activate kindle_app
+kindle-vocab-doctor
+```
+
+The doctor checks Python imports, Node/npm, Cargo/Rust, NLTK resources, Vite, and
+Tauri `cargo metadata`.
+
+## Local environment
+
+LLM enrichment is optional. Copy `.env.example` to `.env` only if you want DS Lab
+/ DeepSeek enrichment:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Fill `DSLAB_API_KEY` in `.env`. The local deterministic optimizer and the
+desktop UI do not require an API key.
+
 The Kindle database and generated exports are local user data and are excluded
 from version control.
+
+## Desktop application
 
 The desktop shell is built with React, TypeScript, Tailwind, and Tauri. Python
 stays responsible for Kindle database access, deterministic scoring, exports,

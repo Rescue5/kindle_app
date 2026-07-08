@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import subprocess
 import os
-import shutil
+import subprocess
 import sys
 from pathlib import Path
 
+from kindle_vocab_app.doctor import check_command, npm_command
 from kindle_vocab_app.logging_config import configure_logging, get_logger
 
 
@@ -13,15 +13,21 @@ logger = get_logger(__name__)
 
 
 def main() -> int:
-    """Compatibility launcher for the new Tauri-based UI."""
+    """Compatibility launcher for the Tauri-based UI."""
 
     root = Path(__file__).resolve().parents[1]
     configure_logging(root / ".app-data" / "logs", console=True)
-    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    npm = npm_command()
     if npm is None:
         logger.error("npm was not found; cannot launch Tauri UI")
-        print("npm не найден. Запусти интерфейс вручную после установки Node.js: npm run dev")
+        print("npm was not found. Run scripts/setup-dev.ps1 or install Node.js, then retry.")
         return 2
+    cargo = check_command("cargo", ["cargo", "--version"])
+    if not cargo.ok:
+        logger.error("cargo was not found; cannot launch Tauri UI detail=%s", cargo.detail)
+        print("cargo was not found. Run scripts/setup-dev.ps1, then retry.")
+        return 2
+
     env = os.environ.copy()
     env["KINDLE_CARDS_PYTHON"] = sys.executable
     logger.info("Launching Tauri dev UI npm=%s cwd=%s python=%s", npm, root, sys.executable)

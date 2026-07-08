@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import html
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
-from kindle_vocab_app.kindle_db import export_entries, fetch_entries, list_books, validate_vocab_db
+from kindle_vocab_app.kindle_db import fetch_entries, list_books, validate_vocab_db
 from kindle_vocab_app.kindle_device import find_kindle_source
 from kindle_vocab_app.logging_config import configure_logging, get_logger
+from kindle_vocab_app.tsv_schema import OPTIMIZED_TSV_HEADER
 from kindle_vocab_app.vocab_optimizer import optimize_entries
 
 
@@ -21,7 +24,8 @@ def main() -> int:
     workspace = _workspace_root()
     configure_logging(workspace / ".app-data" / "tauri-logs", console=True)
     try:
-        request = json.loads(sys.stdin.read() or "{}")
+        request_body = (sys.stdin.read() or "{}").lstrip("\ufeff")
+        request = json.loads(request_body)
         action = str(request.get("action") or "")
         payload = dict(request.get("payload") or {})
         logger.info("Tauri bridge request action=%s payload_keys=%s", action, sorted(payload))
@@ -40,6 +44,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
             return demo_state()
         source = find_kindle_source()
         if source is None:
+            return missing_kindle_state()
             return demo_state(
                 source_name="Kindle не найден",
                 source_status="Подключите Kindle по USB. Пока показаны демонстрационные слова.",
@@ -53,8 +58,8 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         entries = list(payload.get("entries") or [])
         export_format = str(payload.get("format") or "anki")
         output = workspace / ".app-data" / f"kindle-{export_format}.tsv"
-        export_entries(entries, output, export_format, html_mode=True)
-        return {"path": str(output)}
+        exported = export_frontend_entries(entries, output, export_format, workspace)
+        return {"path": str(output), "exported": exported}
 
     if action == "optimize":
         entries = list(payload.get("entries") or [])
@@ -105,6 +110,13 @@ def _workspace_root() -> Path:
     return current
 
 
+def missing_kindle_state() -> dict[str, Any]:
+    return demo_state(
+        source_name="Kindle не найден",
+        source_status="Подключите Kindle по USB. Пока показаны демонстрационные слова.",
+    )
+
+
 def load_database_state(db_path: Path, source_label: str) -> dict[str, Any]:
     books = [{"label": "Все книги", "key": ""}]
     for book in list_books(db_path):
@@ -147,6 +159,185 @@ def _entry_id(entry: dict[str, object]) -> str:
     return hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()
 
 
+def export_frontend_entries(
+    entries: list[object],
+    output_path: Path,
+    export_format: str,
+    workspace: Path,
+) -> int:
+    saved_rows = _load_saved_optimized_rows(workspace / ".app-data" / "optimized" / "optimized.tsv")
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        entry = dict(item)
+        row = _optimized_row_from_frontend(entry)
+        if row is None:
+            row = _saved_optimized_row_for_entry(entry, saved_rows)
+        if row is None or not _is_exportable_optimized_row(row):
+            continue
+        key = _optimized_export_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if export_format == "anki":
+        _write_anki_export(rows, output_path)
+    elif export_format == "quizlet":
+        _write_quizlet_export(rows, output_path)
+    else:
+        raise ValueError(f"Unsupported export format: {export_format}")
+
+    logger.info("Exported optimized rows path=%s format=%s rows=%d", output_path, export_format, len(rows))
+    return len(rows)
+
+
+def _optimized_row_from_frontend(entry: dict[str, Any]) -> dict[str, str] | None:
+    analysis = entry.get("analysis")
+    if not isinstance(analysis, dict):
+        return None
+    if analysis.get("accepted") is False:
+        return None
+    if _export_score(analysis.get("importance_score")) is None:
+        return None
+
+    warnings = analysis.get("warnings") or []
+    source_forms = analysis.get("source_word_forms") or [entry.get("word") or ""]
+    return {
+        "Word": _clean_export(entry.get("word")),
+        "Base form": _clean_export(analysis.get("base_form") or entry.get("stem") or entry.get("word")),
+        "Part of speech": _clean_export(analysis.get("pos")),
+        "Russian meaning(s)": _clean_export(analysis.get("russian_meanings")),
+        "Generated context sentence EN": _clean_export(analysis.get("generated_context_en")),
+        "Generated context sentence RU": _clean_export(analysis.get("generated_context_ru")),
+        "Importance 0-10": _clean_export(analysis.get("importance_score")),
+        "Importance note": _clean_export(analysis.get("importance_note")),
+        "Lemma Zipf": _clean_export(analysis.get("lemma_zipf")),
+        "Form Zipf": _clean_export(analysis.get("form_zipf")),
+        "WordNet synset count": _clean_export(analysis.get("wordnet_synset_count")),
+        "WordNet POS count": _clean_export(analysis.get("wordnet_pos_count")),
+        "Warnings": _clean_export(_join_export_values(warnings)),
+        "Tags": _clean_export(analysis.get("tags")),
+        "Source word forms": _clean_export(_join_export_values(source_forms)),
+        "Source occurrence count": _clean_export(analysis.get("source_occurrence_count")),
+        "Original word": _clean_export(entry.get("word")),
+        "Original stem": _clean_export(entry.get("stem")),
+        "Original context": _clean_export(entry.get("context")),
+        "Original book_title": _clean_export(entry.get("book_title")),
+        "Original authors": _clean_export(entry.get("authors")),
+        "Original language": _clean_export(entry.get("language")),
+        "Original looked_up_at": _clean_export(entry.get("looked_up_at")),
+    }
+
+
+def _load_saved_optimized_rows(path: Path) -> dict[str, dict[str, str]]:
+    rows: dict[str, dict[str, str]] = {}
+    if not path.exists():
+        return rows
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file, delimiter="\t")
+        for raw_row in reader:
+            row = {header: str((raw_row or {}).get(header) or "") for header in OPTIMIZED_TSV_HEADER}
+            rows[_optimized_export_key(row)] = row
+    return rows
+
+
+def _saved_optimized_row_for_entry(
+    entry: dict[str, Any],
+    saved_rows: dict[str, dict[str, str]],
+) -> dict[str, str] | None:
+    if not saved_rows:
+        return None
+    analysis = entry.get("analysis") if isinstance(entry.get("analysis"), dict) else {}
+    base_candidates = [
+        str(analysis.get("base_form") or ""),
+        str(entry.get("stem") or ""),
+        str(entry.get("word") or ""),
+    ]
+    book_title = str(entry.get("book_title") or "")
+    authors = str(entry.get("authors") or "")
+    for base_form in base_candidates:
+        key = _optimized_export_key_from_values(base_form, book_title, authors)
+        if key in saved_rows:
+            return saved_rows[key]
+    return None
+
+
+def _is_exportable_optimized_row(row: dict[str, str]) -> bool:
+    return _export_score(row.get("Importance 0-10")) is not None
+
+
+def _write_anki_export(rows: list[dict[str, str]], output_path: Path) -> None:
+    with output_path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=OPTIMIZED_TSV_HEADER, delimiter="\t", extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({header: row.get(header, "") for header in OPTIMIZED_TSV_HEADER})
+
+
+def _write_quizlet_export(rows: list[dict[str, str]], output_path: Path) -> None:
+    with output_path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.writer(file, delimiter="\t")
+        writer.writerow(["term", "definition"])
+        for row in rows:
+            source = " - ".join(part for part in [row.get("Original book_title", ""), row.get("Original authors", "")] if part)
+            details = [
+                f"base: {row.get('Base form', '')}",
+                f"score: {row.get('Importance 0-10', '')}/10",
+            ]
+            if row.get("Part of speech"):
+                details.append(f"pos: {row['Part of speech']}")
+            if row.get("Lemma Zipf"):
+                details.append(f"lemma Zipf: {row['Lemma Zipf']}")
+            if row.get("Form Zipf"):
+                details.append(f"form Zipf: {row['Form Zipf']}")
+            if row.get("Importance note"):
+                details.append(f"note: {row['Importance note']}")
+            if row.get("Original context"):
+                details.append(f"context: {row['Original context']}")
+            if source:
+                details.append(f"source: {source}")
+            writer.writerow([row.get("Word", ""), "; ".join(details)])
+
+
+def _optimized_export_key(row: dict[str, str]) -> str:
+    return _optimized_export_key_from_values(
+        row.get("Base form", ""),
+        row.get("Original book_title", ""),
+        row.get("Original authors", ""),
+    )
+
+
+def _optimized_export_key_from_values(base_form: object, book_title: object, authors: object) -> str:
+    return "\t".join(str(value or "").casefold().strip() for value in [base_form, book_title, authors])
+
+
+def _export_score(value: object) -> int | None:
+    try:
+        score = int(float(str(value)))
+    except (TypeError, ValueError):
+        return None
+    if score < 0 or score > 10:
+        return None
+    return score
+
+
+def _join_export_values(value: object) -> str:
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value if str(item))
+    return str(value or "")
+
+
+def _clean_export(value: object) -> str:
+    text = "" if value is None else str(value)
+    text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+    return html.escape(text, quote=False)
+
+
 def _entry_updates_from_analysis(
     analysis_dir: Path,
     submitted_entries: list[object],
@@ -171,7 +362,9 @@ def _entry_updates_from_analysis(
             continue
         importance = dict(analysis.get("importance") or {})
         frequencies = dict(analysis.get("frequencies") or {})
+        wordnet = dict(analysis.get("wordnet") or {})
         warnings = dict(analysis.get("warnings") or {})
+        tsv_row = dict(analysis.get("tsv_row") or {})
         accepted = bool(analysis.get("accepted"))
         updates.append(
             {
@@ -184,7 +377,13 @@ def _entry_updates_from_analysis(
                     "importance_score": importance.get("score"),
                     "importance_note": str(importance.get("note") or ""),
                     "frequency_note": _frequency_note(frequencies),
+                    "lemma_zipf": frequencies.get("lemma_zipf"),
+                    "form_zipf": frequencies.get("form_zipf"),
+                    "wordnet_synset_count": wordnet.get("synset_count"),
+                    "wordnet_pos_count": wordnet.get("pos_count"),
                     "warnings": sorted(warnings),
+                    "tags": str(tsv_row.get("Tags") or ""),
+                    "source_word_forms": analysis.get("source_word_forms") or [],
                     "source_occurrence_count": analysis.get("source_occurrence_count"),
                     "processed_at": str(analysis.get("processed_at") or ""),
                     "translation_status": "offline_only",

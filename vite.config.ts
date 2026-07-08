@@ -10,8 +10,17 @@ export default defineConfig({
     },
   },
   server: {
+    host: "127.0.0.1",
     port: 1420,
     strictPort: true,
+    watch: {
+      ignored: [
+        "**/.app-data/**",
+        "**/build/**",
+        "**/dist/**",
+        "**/src-tauri/target/**",
+      ],
+    },
   },
   clearScreen: false,
 });

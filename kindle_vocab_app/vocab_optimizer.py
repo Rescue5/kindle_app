@@ -21,44 +21,30 @@ from kindle_vocab_app.tsv_schema import OPTIMIZED_TSV_HEADER
 
 logger = get_logger(__name__)
 
-A1_AND_FUNCTION_WORDS = {
+FUNCTION_WORDS = {
     "a",
-    "about",
-    "after",
-    "again",
-    "all",
-    "also",
     "am",
     "an",
     "and",
-    "any",
     "are",
     "as",
     "at",
     "be",
     "because",
     "been",
-    "before",
     "but",
     "by",
     "can",
-    "come",
     "could",
-    "day",
     "do",
     "does",
-    "down",
     "for",
     "from",
-    "get",
-    "go",
-    "good",
     "had",
     "has",
     "have",
     "he",
     "her",
-    "here",
     "him",
     "his",
     "how",
@@ -69,34 +55,16 @@ A1_AND_FUNCTION_WORDS = {
     "is",
     "it",
     "its",
-    "just",
-    "know",
-    "like",
-    "look",
-    "make",
-    "man",
     "me",
-    "more",
     "my",
-    "new",
     "no",
     "not",
-    "now",
     "of",
     "on",
-    "one",
     "or",
     "our",
-    "out",
-    "over",
-    "people",
-    "said",
-    "say",
-    "see",
     "she",
     "so",
-    "some",
-    "take",
     "than",
     "that",
     "the",
@@ -106,17 +74,11 @@ A1_AND_FUNCTION_WORDS = {
     "there",
     "these",
     "they",
-    "thing",
     "this",
-    "time",
     "to",
-    "too",
-    "up",
     "us",
-    "very",
     "was",
     "we",
-    "well",
     "were",
     "what",
     "when",
@@ -129,6 +91,49 @@ A1_AND_FUNCTION_WORDS = {
     "you",
     "your",
 }
+
+COMMON_LEARNER_WORDS = {
+    "about",
+    "after",
+    "again",
+    "all",
+    "also",
+    "any",
+    "before",
+    "come",
+    "day",
+    "down",
+    "get",
+    "go",
+    "good",
+    "here",
+    "just",
+    "know",
+    "like",
+    "look",
+    "make",
+    "man",
+    "more",
+    "new",
+    "now",
+    "one",
+    "out",
+    "over",
+    "people",
+    "said",
+    "say",
+    "see",
+    "some",
+    "take",
+    "thing",
+    "time",
+    "too",
+    "up",
+    "very",
+    "well",
+}
+
+A1_AND_FUNCTION_WORDS = FUNCTION_WORDS | COMMON_LEARNER_WORDS
 
 PHRASAL_EXPRESSIONS = {
     "back up",
@@ -436,6 +441,7 @@ def _analyze_group(
     base_form = str(representative["base_form"])
     context = str(entry.get("context") or "")
     pos = str(representative["pos_tag"])
+    occurrence_count = len(group)
     wordnet = wordnet_features(base_form, pos, context)
     frequencies = {
         "lemma_zipf": zipf_frequency(base_form, "en"),
@@ -444,6 +450,8 @@ def _analyze_group(
     warnings = detect_warnings(word, base_form, context, wordnet)
     proper_noun = is_probable_proper_noun(str(entry.get("word") or ""), context, wordnet)
     genre = genre_features(entry, wordnet, config)
+    if word in FUNCTION_WORDS or base_form in FUNCTION_WORDS:
+        warnings["too_basic"] = True
     score, score_parts = score_importance(
         word=word,
         base_form=base_form,
@@ -452,14 +460,12 @@ def _analyze_group(
         warnings=warnings,
         proper_noun=proper_noun,
         genre=genre,
+        occurrence_count=occurrence_count,
     )
-    accepted = score >= 2 and not warnings.get("non_english") and not warnings.get("non_word")
-    if word in A1_AND_FUNCTION_WORDS or base_form in A1_AND_FUNCTION_WORDS:
-        accepted = False
-        warnings["too_basic"] = True
+    reject_warnings = {"too_basic", "non_english", "non_word", "unknown_to_local_lexicons", "possibly_glued_words"}
+    accepted = not bool(reject_warnings & set(warnings))
 
     tags = build_tags(score, entry, representative, warnings, proper_noun, genre)
-    occurrence_count = len(group)
     source_forms = sorted({str(item["entry"].get("word") or item["normalized_word"]) for item in group})
 
     analysis = {
@@ -488,8 +494,12 @@ def _analyze_group(
         "tsv_row": optimized_row(
             word=word,
             base_form=base_form,
+            pos=pos,
             score=score,
             note=importance_note(score, wordnet, warnings, proper_noun),
+            frequencies=frequencies,
+            wordnet=wordnet,
+            warnings=warnings,
             tags=tags,
             source_forms=source_forms,
             occurrence_count=occurrence_count,
@@ -571,7 +581,7 @@ def detect_warnings(
         warnings["repeated_letters"] = True
     if not re.search(r"[a-z]", word) or len(word) <= 1:
         warnings["non_word"] = True
-    if re.search(r"[^A-Za-z0-9\\s.,;:!?\"'()\\-—–“”‘’]", context):
+    if re.search(r"[^A-Za-z0-9\s.,;:!?\"'()\-—–“”‘’]", context):
         warnings["context_has_unusual_symbols"] = True
     if _looks_non_english(word, base_form):
         warnings["non_english"] = True
@@ -593,31 +603,21 @@ def score_importance(
     warnings: dict[str, Any],
     proper_noun: bool,
     genre: dict[str, Any],
+    occurrence_count: int = 1,
 ) -> tuple[int, dict[str, float]]:
     lemma_zipf = float(frequencies["lemma_zipf"])
     form_zipf = float(frequencies["form_zipf"])
-    score = 0.0
-
-    if lemma_zipf >= 5.0:
-        score = 9.0
-    elif lemma_zipf >= 4.2:
-        score = 8.0
-    elif lemma_zipf >= 3.5:
-        score = 6.5
-    elif lemma_zipf >= 2.8:
-        score = 4.5
-    elif lemma_zipf >= 2.0:
-        score = 2.5
-    else:
-        score = 1.0
+    effective_zipf = max(lemma_zipf, form_zipf)
+    score = 0.0 if effective_zipf <= 0 else max(1.0, (effective_zipf - 1.1) * 2.7)
 
     form_gap = max(0.0, lemma_zipf - form_zipf)
-    form_bonus = min(1.0, form_gap * 0.25)
-    polysemy_bonus = min(1.0, math.log1p(int(wordnet.get("synset_count") or 0)) * 0.25)
-    pos_bonus = min(0.8, max(0, int(wordnet.get("pos_count") or 0) - 1) * 0.25)
-    phrase_bonus = 0.7 if " " in base_form else 0.0
-    genre_bonus = 0.5 if genre.get("preferred_match") else 0.0
-    specialized_penalty = -0.7 if genre.get("specialized") and not genre.get("preferred_match") else 0.0
+    form_bonus = min(0.6, form_gap * 0.18)
+    polysemy_bonus = min(0.5, math.log1p(int(wordnet.get("synset_count") or 0)) * 0.12)
+    pos_bonus = min(0.35, max(0, int(wordnet.get("pos_count") or 0) - 1) * 0.15)
+    phrase_bonus = 0.6 if " " in base_form else 0.0
+    occurrence_bonus = min(0.8, math.log1p(max(0, occurrence_count - 1)) * 0.35)
+    genre_bonus = 0.4 if genre.get("preferred_match") else 0.0
+    specialized_penalty = -0.5 if genre.get("specialized") and not genre.get("preferred_match") else 0.0
     serious_warnings = {
         "unusual_characters",
         "repeated_letters",
@@ -626,12 +626,14 @@ def score_importance(
         "unknown_to_local_lexicons",
         "possibly_glued_words",
     }
-    warning_penalty = -1.5 if serious_warnings & set(warnings) else 0.0
+    warning_penalty = -2.0 if serious_warnings & set(warnings) else 0.0
 
-    score += form_bonus + polysemy_bonus + pos_bonus + phrase_bonus + genre_bonus
+    score += form_bonus + polysemy_bonus + pos_bonus + phrase_bonus + occurrence_bonus + genre_bonus
     score += specialized_penalty + warning_penalty
 
-    if base_form in A1_AND_FUNCTION_WORDS or word in A1_AND_FUNCTION_WORDS:
+    if effective_zipf > 0 and not serious_warnings & set(warnings):
+        score = max(score, 3.0)
+    if base_form in FUNCTION_WORDS or word in FUNCTION_WORDS:
         score = min(score, 1.0)
     if proper_noun:
         score = min(score, 3.0)
@@ -643,10 +645,13 @@ def score_importance(
     parts = {
         "lemma_frequency_base": lemma_zipf,
         "form_frequency": form_zipf,
+        "effective_frequency": effective_zipf,
+        "frequency_score_base": 0.0 if effective_zipf <= 0 else max(1.0, (effective_zipf - 1.1) * 2.7),
         "form_gap_bonus": form_bonus,
         "polysemy_bonus": polysemy_bonus,
         "pos_bonus": pos_bonus,
         "phrase_bonus": phrase_bonus,
+        "occurrence_bonus": occurrence_bonus,
         "genre_bonus": genre_bonus,
         "specialized_penalty": specialized_penalty,
         "warning_penalty": warning_penalty,
@@ -718,8 +723,12 @@ def optimized_row(
     *,
     word: str,
     base_form: str,
+    pos: str,
     score: int,
     note: str,
+    frequencies: dict[str, Any],
+    wordnet: dict[str, Any],
+    warnings: dict[str, Any],
     tags: str,
     source_forms: list[str],
     occurrence_count: int,
@@ -728,11 +737,17 @@ def optimized_row(
     return {
         "Word": word,
         "Base form": base_form,
+        "Part of speech": pos,
         "Russian meaning(s)": "",
         "Generated context sentence EN": "",
         "Generated context sentence RU": "",
         "Importance 0-10": str(score),
         "Importance note": note,
+        "Lemma Zipf": _format_float(frequencies.get("lemma_zipf")),
+        "Form Zipf": _format_float(frequencies.get("form_zipf")),
+        "WordNet synset count": str(wordnet.get("synset_count") or 0),
+        "WordNet POS count": str(wordnet.get("pos_count") or 0),
+        "Warnings": ", ".join(sorted(warnings)),
         "Tags": tags,
         "Source word forms": ", ".join(source_forms),
         "Source occurrence count": str(occurrence_count),
@@ -753,7 +768,7 @@ def importance_note(
     proper_noun: bool,
 ) -> str:
     if warnings.get("too_basic"):
-        return "слишком базовое слово"
+        return "служебное слово, не подходит для отдельной карточки"
     if warnings.get("non_english"):
         return "не похоже на английское слово"
     if warnings.get("unknown_to_local_lexicons") or warnings.get("possibly_glued_words"):
@@ -762,13 +777,13 @@ def importance_note(
         return "вероятное имя собственное"
     parts = []
     if score >= 8:
-        parts.append("частое и полезное")
+        parts.append("частое слово из пользовательского словаря")
     elif score >= 5:
-        parts.append("умеренно полезное")
+        parts.append("умеренно частое слово")
     elif score >= 2:
-        parts.append("редкое, но возможно полезное")
+        parts.append("редкое слово, но оставлено для повторения")
     else:
-        parts.append("низкая полезность")
+        parts.append("низкий алгоритмический приоритет")
     if int(wordnet.get("synset_count") or 0) >= 4:
         parts.append("многозначное")
     if int(wordnet.get("pos_count") or 0) >= 2:
@@ -784,13 +799,39 @@ def source_tag(title: str) -> str:
 
 
 def _write_optimized_tsv(path: Path, analyses: list[dict[str, Any]]) -> None:
-    logger.info("Writing optimized TSV path=%s rows=%d", path, len(analyses))
+    existing_rows = _read_optimized_tsv_rows(path)
+    rows_by_key = {_optimized_row_key(row): row for row in existing_rows}
+    for analysis in analyses:
+        row = analysis["tsv_row"]
+        rows_by_key[_optimized_row_key(row)] = row
+    rows = list(rows_by_key.values())
+    logger.info(
+        "Writing optimized TSV path=%s new_rows=%d preserved_rows=%d total_rows=%d",
+        path,
+        len(analyses),
+        len(existing_rows),
+        len(rows),
+    )
     with path.open("w", encoding="utf-8", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=OPTIMIZED_TSV_HEADER, delimiter="\t")
+        writer = csv.DictWriter(file, fieldnames=OPTIMIZED_TSV_HEADER, delimiter="\t", extrasaction="ignore")
         writer.writeheader()
-        for analysis in analyses:
-            writer.writerow(analysis["tsv_row"])
-    logger.info("Wrote optimized TSV path=%s rows=%d", path, len(analyses))
+        for row in rows:
+            writer.writerow({header: row.get(header, "") for header in OPTIMIZED_TSV_HEADER})
+    logger.info("Wrote optimized TSV path=%s rows=%d", path, len(rows))
+
+
+def _read_optimized_tsv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
+        return list(csv.DictReader(file, delimiter="\t"))
+
+
+def _optimized_row_key(row: dict[str, Any]) -> str:
+    return "\t".join(
+        str(row.get(key) or "").casefold()
+        for key in ["Base form", "Original book_title", "Original authors"]
+    )
 
 
 def _write_analysis_json(output_dir: Path, lexical_key: str, analysis: dict[str, Any]) -> None:
@@ -913,3 +954,11 @@ def _safe_int(value: object) -> int:
         return int(str(value or "0"))
     except ValueError:
         return 0
+
+
+def _format_float(value: object) -> str:
+    try:
+        number = float(str(value))
+    except (TypeError, ValueError):
+        return ""
+    return f"{number:.2f}".rstrip("0").rstrip(".")

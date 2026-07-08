@@ -11,7 +11,7 @@ function rawEntry(entry: Omit<VocabEntry, "id" | "processing_status" | "export_s
   };
 }
 
-const demoEntries: VocabEntry[] = [
+const baseDemoEntries: VocabEntry[] = [
   rawEntry({
     word: "afraid",
     stem: "afraid",
@@ -94,11 +94,54 @@ const demoEntries: VocabEntry[] = [
   }),
 ];
 
-const demoBooks: BookOption[] = [
-  { label: "Все книги", key: "" },
-  { label: "The Night Reader · Demo Library · 4", key: "demo-night" },
-  { label: "Shadows and Signals · Demo Library · 4", key: "demo-shadow" },
-];
+const demoEntries = buildDemoEntries(getPreviewEntryCount());
+const demoBooks = buildDemoBooks(demoEntries);
+
+function getPreviewEntryCount() {
+  if (typeof window === "undefined") return baseDemoEntries.length;
+  const params = new URLSearchParams(window.location.search);
+  const requested = params.get("demoRows") ?? (params.has("stress") ? "1200" : "");
+  const parsed = Number(requested);
+  if (!Number.isFinite(parsed) || parsed <= baseDemoEntries.length) return baseDemoEntries.length;
+  return Math.min(2500, Math.round(parsed));
+}
+
+function buildDemoEntries(count: number) {
+  const entries = [...baseDemoEntries];
+  for (let index = entries.length; index < count; index += 1) {
+    const seed = baseDemoEntries[index % baseDemoEntries.length];
+    if (index % 83 === 0) {
+      entries.push({ ...seed });
+      continue;
+    }
+    const sequence = index + 1;
+    entries.push(
+      rawEntry({
+        word: seed.word,
+        stem: seed.stem,
+        context: `${seed.context} Preview occurrence ${sequence}.`,
+        book_key: seed.book_key,
+        book_title: seed.book_title,
+        authors: seed.authors,
+        language: seed.language,
+        looked_up_at: `2026-06-${String((index % 28) + 1).padStart(2, "0")}`,
+      }),
+    );
+  }
+  return entries;
+}
+
+function buildDemoBooks(entries: VocabEntry[]): BookOption[] {
+  const counts = entries.reduce(
+    (acc, entry) => acc.set(entry.book_key, (acc.get(entry.book_key) ?? 0) + 1),
+    new Map<string, number>(),
+  );
+  return [
+    { label: "Все книги", key: "" },
+    { label: `The Night Reader · Demo Library · ${counts.get("demo-night") ?? 0}`, key: "demo-night" },
+    { label: `Shadows and Signals · Demo Library · ${counts.get("demo-shadow") ?? 0}`, key: "demo-shadow" },
+  ];
+}
 
 const demoEvents: ActivityEvent[] = [
   {
@@ -156,8 +199,14 @@ async function mockBackend<T>(action: string, payload: unknown): Promise<T> {
           accepted: true,
           importance_score: Math.max(2, Math.min(8, Math.round(entry.word.length * 0.7))),
           importance_note: "оценено локальными правилами",
-          frequency_note: "offline-анализ без перевода",
+          frequency_note: "lemma Zipf 3.8, form Zipf 3.6",
+          lemma_zipf: 3.8,
+          form_zipf: 3.6,
+          wordnet_synset_count: 4,
+          wordnet_pos_count: 2,
           warnings: [],
+          tags: "priority_medium preview",
+          source_word_forms: [entry.word],
           source_occurrence_count: 1,
           translation_status: "offline_only",
           tsv_path: "preview/optimized.tsv",
@@ -174,7 +223,8 @@ async function mockBackend<T>(action: string, payload: unknown): Promise<T> {
     } as T;
   }
   if (action === "export") {
-    return { path: "preview/export.tsv" } as T;
+    const entries = (payload as { entries?: VocabEntry[] })?.entries ?? [];
+    return { path: "preview/export.tsv", exported: entries.length } as T;
   }
   return {} as T;
 }

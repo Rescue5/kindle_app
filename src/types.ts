@@ -27,7 +27,13 @@ export type WordAnalysis = {
   importance_score?: number;
   importance_note?: string;
   frequency_note?: string;
+  lemma_zipf?: number;
+  form_zipf?: number;
+  wordnet_synset_count?: number;
+  wordnet_pos_count?: number;
   warnings?: string[];
+  tags?: string;
+  source_word_forms?: string[];
   source_occurrence_count?: number;
   processed_at?: string;
   tsv_path?: string;

@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   AlertCircle,
   Archive,
@@ -91,9 +91,10 @@ function App() {
   const [exportFormat, setExportFormat] = React.useState<ExportFormat>("anki");
   const [lastError, setLastError] = React.useState("");
   const requestId = React.useRef(0);
+  const deferredSearchText = React.useDeferredValue(state.searchText);
 
   const filteredEntries = React.useMemo(() => {
-    const query = state.searchText.trim().toLowerCase();
+    const query = deferredSearchText.trim().toLowerCase();
     const selectedBook = state.books[state.selectedBookIndex];
     return state.entries.filter((entry) => {
       const bookMatch = matchesSelectedBook(entry, selectedBook?.key ?? "", selectedBook?.label ?? "");
@@ -102,10 +103,10 @@ function App() {
         !query ||
         [entry.word, entry.stem, entry.context, entry.book_title, entry.authors].some((value) =>
           (value || "").toLowerCase().includes(query),
-        );
+      );
       return bookMatch && statusMatch && queryMatch;
     });
-  }, [state.entries, state.searchText, state.selectedBookIndex, state.books, statusFilter]);
+  }, [state.entries, deferredSearchText, state.selectedBookIndex, state.books, statusFilter]);
 
   React.useEffect(() => {
     if (!filteredEntries.length) {
@@ -167,6 +168,7 @@ function App() {
   async function runOptimize() {
     const submitted = filteredEntries;
     if (!submitted.length) return;
+    const submittedIds = new Set(submitted.map((entry) => entry.id));
     const id = ++requestId.current;
     setActiveStage(1);
     setRunState("processing");
@@ -176,15 +178,15 @@ function App() {
       processing: true,
       statusMessage: "Идёт offline-обработка слов...",
       entries: current.entries.map((entry) =>
-        submitted.some((item) => item.id === entry.id) ? { ...entry, processing_status: "processing" } : entry,
+        submittedIds.has(entry.id) ? { ...entry, processing_status: "processing" } : entry,
       ),
     }));
     try {
       const result = await callBackend<OptimizeResult>("optimize", { entries: submitted });
       if (id !== requestId.current) return;
       const updates = result.entry_updates ?? [];
-      const updatedIds = new Set(updates.map((update) => update.id));
-      const submittedIds = new Set(submitted.map((entry) => entry.id));
+      const updatesById = new Map(updates.map((update) => [update.id, update]));
+      const updatedIds = new Set(updatesById.keys());
       setActiveStage(7);
       setRunState("waiting");
       setState((current) => ({
@@ -192,7 +194,7 @@ function App() {
         processing: false,
         statusMessage: `Offline-обработка завершена: ${result.processed_new} новых групп`,
         entries: current.entries.map((entry) => {
-          const update = updates.find((item) => item.id === entry.id);
+          const update = updatesById.get(entry.id);
           if (update) {
             return {
               ...entry,
@@ -231,7 +233,7 @@ function App() {
       setState((current) => ({
         ...current,
         entries: current.entries.map((entry) =>
-          submitted.some((item) => item.id === entry.id) ? { ...entry, processing_status: "failed" } : entry,
+          submittedIds.has(entry.id) ? { ...entry, processing_status: "failed" } : entry,
         ),
       }));
       fail("Ошибка offline-обработки", String(error));
@@ -239,7 +241,7 @@ function App() {
   }
 
   async function runExport() {
-    const exportable = filteredEntries.filter((entry) => ["processed", "skipped"].includes(entryStatus(entry)));
+    const exportable = filteredEntries.filter(isExportableEntry);
     if (!exportable.length) {
       fail("Нет обработанных слов для экспорта", "Сначала запустите offline-обработку выбранной выборки.");
       return;
@@ -249,8 +251,13 @@ function App() {
     setRunState("exporting");
     setLastError("");
     try {
-      const result = await callBackend<{ path: string }>("export", { format: exportFormat, entries: exportable });
+      const result = await callBackend<{ path: string; exported?: number }>("export", { format: exportFormat, entries: exportable });
       if (id !== requestId.current) return;
+      const exportedCount = result.exported ?? exportable.length;
+      if (exportedCount <= 0) {
+        fail("Нет строк для экспорта", "В текущей выборке нет принятых слов с offline-оценкой.");
+        return;
+      }
       const exportedIds = new Set(exportable.map((entry) => entry.id));
       setRunState("exported");
       setState((current) => ({
@@ -264,7 +271,7 @@ function App() {
           {
             phase: "answered",
             title: `${exportFormat.toUpperCase()} экспорт`,
-            message: `${exportable.length} обработанных строк сохранено для импорта.`,
+            message: `${exportedCount} обработанных строк сохранено для импорта.`,
             meta: result.path,
           },
           ...current.activityEvents,
@@ -303,9 +310,9 @@ function App() {
 
   return (
     <main className="premium-grid h-full overflow-hidden text-foreground">
-      <div className="grid h-full grid-cols-[224px_minmax(620px,1fr)_390px] gap-0">
+      <div className="grid h-full min-h-0 min-w-0 grid-cols-[208px_minmax(0,1fr)_320px] gap-0">
         <Sidebar state={state} runState={runState} onScan={() => runLoad("scan")} />
-        <section className="flex min-w-0 flex-col border-x border-line/80">
+        <section className="flex min-h-0 min-w-0 flex-col border-x border-line/80">
           <TopBar
             state={state}
             setState={setState}
@@ -334,7 +341,7 @@ function App() {
           />
           <VocabularyList entries={filteredEntries} selectedKey={selectedKey} onSelect={setSelectedKey} />
         </section>
-        <aside className="flex min-w-0 flex-col bg-panel/70">
+        <aside className="flex min-h-0 min-w-0 flex-col bg-panel/70">
           <WordInspector entry={selectedEntry} onClose={() => setSelectedKey("")} />
           <ProcessingPipeline runState={runState} activeStage={activeStage} entry={selectedEntry} events={state.activityEvents} />
         </aside>
@@ -432,13 +439,13 @@ function TopBar({
   onCancel: () => void;
 }) {
   return (
-    <header className="border-b border-line bg-background/35 px-5 py-4">
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div>
+    <header className="flex-none border-b border-line bg-background/35 px-5 py-4">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-[220px] flex-1">
           <h1 className="text-[22px] font-semibold leading-7">Библиотека</h1>
           <p className="mt-1 text-sm text-muted-foreground">Слова, контексты и карточки из Kindle Vocabulary Builder</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
           {busy ? (
             <Button variant="secondary" onClick={onCancel}>
               <X size={15} />
@@ -455,7 +462,7 @@ function TopBar({
           </Button>
         </div>
       </div>
-      <div className="grid grid-cols-[minmax(260px,1fr)_220px_142px_110px] gap-3">
+      <div className="grid grid-cols-[minmax(180px,1fr)_minmax(150px,200px)_96px_auto] gap-2">
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -488,15 +495,15 @@ function TopBar({
           Экспорт
         </Button>
       </div>
-      <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
-        <div className="flex items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-2">
           <FilterPill label="Все" value={state.entries.length} active={statusFilter === "all"} onClick={() => setStatusFilter("all")} />
           <FilterPill label="Новые" value={counts.raw} active={statusFilter === "raw"} onClick={() => setStatusFilter("raw")} />
           <FilterPill label="Обработанные" value={counts.processed} active={statusFilter === "processed"} onClick={() => setStatusFilter("processed")} />
           <FilterPill label="Отклонённые" value={counts.rejected} active={statusFilter === "rejected"} onClick={() => setStatusFilter("rejected")} />
           <FilterPill label="Пропущенные" value={counts.skipped} active={statusFilter === "skipped"} onClick={() => setStatusFilter("skipped")} />
         </div>
-        <div>{total} слов в выборке</div>
+        <div className="shrink-0">{total} слов в выборке</div>
       </div>
     </header>
   );
@@ -561,7 +568,7 @@ function StatusStrip({
   const Icon = content.icon;
   const isBusy = ["syncing", "processing", "exporting"].includes(runState);
   return (
-    <div className="border-b border-line bg-panel-raised/55 px-5 py-2.5">
+    <div className="flex-none border-b border-line bg-panel-raised/55 px-5 py-2.5">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <Icon size={16} className={`${isBusy ? "animate-spin" : ""} ${runState === "error" ? "text-destructive" : "text-primary"}`} />
@@ -595,50 +602,55 @@ function VocabularyList({
   onSelect: (key: string) => void;
 }) {
   return (
-    <div className="min-h-0 flex-1 overflow-hidden">
-      <div className="grid h-10 grid-cols-[minmax(140px,0.9fr)_minmax(220px,1.6fr)_minmax(140px,0.9fr)_132px] border-b border-line bg-panel/55 px-5 text-xs font-medium uppercase text-muted-foreground">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="grid h-10 grid-cols-[minmax(96px,0.8fr)_minmax(140px,1.4fr)_minmax(110px,0.9fr)_96px] border-b border-line bg-panel/55 px-5 text-xs font-medium uppercase text-muted-foreground">
         <div className="flex items-center">Слово</div>
         <div className="flex items-center">Контекст</div>
         <div className="flex items-center">Книга</div>
         <div className="flex items-center">Статус</div>
       </div>
-      <div className="app-scrollbar h-[calc(100%-40px)] overflow-auto">
-        <AnimatePresence initial={false}>
-          {entries.length ? (
-            entries.map((entry, index) => {
-              const selected = entry.id === selectedKey;
-              const status = entryStatus(entry);
-              return (
-                <motion.button
-                  key={entry.id}
-                  type="button"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ ...tokens.motion.spring, delay: Math.min(index * 0.008, 0.08) }}
-                  onClick={() => onSelect(entry.id)}
-                  className={`grid min-h-[44px] w-full grid-cols-[minmax(140px,0.9fr)_minmax(220px,1.6fr)_minmax(140px,0.9fr)_132px] items-center border-b border-l-2 border-b-line/70 px-5 text-left text-sm transition ${
-                    selected ? "border-l-primary bg-secondary/80" : "border-l-transparent hover:bg-secondary/45 active:bg-secondary/70"
-                  }`}
-                >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className={`h-1.5 w-1.5 rounded-full ${statusColor(status)}`} />
-                    <span className="truncate font-medium text-foreground">{entry.word}</span>
-                  </div>
-                  <div className="truncate text-muted-foreground">{entry.context || "Контекст не найден"}</div>
-                  <div className="truncate text-muted-foreground">{entry.book_title || "Без названия"}</div>
-                  <WordStatus state={status} />
-                </motion.button>
-              );
-            })
-          ) : (
-            <EmptyDictionary />
-          )}
-        </AnimatePresence>
+      <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto overflow-x-hidden" data-testid="vocabulary-list">
+        {entries.length ? (
+          entries.map((entry) => (
+            <VocabularyRow key={entry.id} entry={entry} selected={entry.id === selectedKey} onSelect={onSelect} />
+          ))
+        ) : (
+          <EmptyDictionary />
+        )}
       </div>
     </div>
   );
 }
+
+const VocabularyRow = React.memo(function VocabularyRow({
+  entry,
+  selected,
+  onSelect,
+}: {
+  entry: VocabEntry;
+  selected: boolean;
+  onSelect: (key: string) => void;
+}) {
+  const status = entryStatus(entry);
+  return (
+    <button
+      type="button"
+      data-entry-id={entry.id}
+      onClick={() => onSelect(entry.id)}
+      className={`vocab-row grid min-h-[44px] w-full grid-cols-[minmax(96px,0.8fr)_minmax(140px,1.4fr)_minmax(110px,0.9fr)_96px] items-center border-b border-l-2 border-b-line/70 px-5 text-left text-sm transition ${
+        selected ? "border-l-primary bg-secondary/80" : "border-l-transparent hover:bg-secondary/45 active:bg-secondary/70"
+      }`}
+    >
+      <div className="flex min-w-0 items-center gap-2">
+        <span className={`h-1.5 w-1.5 rounded-full ${statusColor(status)}`} />
+        <span className="truncate font-medium text-foreground">{entry.word}</span>
+      </div>
+      <div className="truncate text-muted-foreground">{entry.context || "Контекст не найден"}</div>
+      <div className="truncate text-muted-foreground">{entry.book_title || "Без названия"}</div>
+      <WordStatus state={status} />
+    </button>
+  );
+});
 
 function WordInspector({ entry, onClose }: { entry: VocabEntry | null; onClose: () => void }) {
   if (!entry) {
@@ -933,12 +945,18 @@ function EmptyField({ text }: { text: string }) {
 }
 
 function normalizeEntries(entries: VocabEntry[]): VocabEntry[] {
-  return entries.map((entry) => ({
-    ...entry,
-    id: entry.id || stableEntryId(entry),
-    processing_status: entry.processing_status || "raw",
-    export_status: entry.export_status || "none",
-  }));
+  const seenIds = new Map<string, number>();
+  return entries.map((entry) => {
+    const baseId = entry.id || stableEntryId(entry);
+    const duplicateIndex = seenIds.get(baseId) ?? 0;
+    seenIds.set(baseId, duplicateIndex + 1);
+    return {
+      ...entry,
+      id: duplicateIndex === 0 ? baseId : `${baseId}::${duplicateIndex + 1}`,
+      processing_status: entry.processing_status || "raw",
+      export_status: entry.export_status || "none",
+    };
+  });
 }
 
 function stableEntryId(entry: VocabEntry) {
@@ -954,6 +972,14 @@ function matchesSelectedBook(entry: VocabEntry, selectedKey: string, selectedLab
 
 function entryStatus(entry: VocabEntry): ProcessingStatus {
   return entry.processing_status || "raw";
+}
+
+function isExportableEntry(entry: VocabEntry) {
+  const status = entryStatus(entry);
+  const score = entry.analysis?.importance_score;
+  if (entry.analysis?.accepted === false) return false;
+  if (status === "skipped") return true;
+  return status === "processed" && typeof score === "number" && Number.isFinite(score);
 }
 
 function countStatuses(entries: VocabEntry[]): Record<ProcessingStatus, number> {
@@ -1048,7 +1074,12 @@ function pipelineCaption(runState: RunState, entry: VocabEntry | null) {
   return "Показывает только фактические результаты обработки";
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+const rootElement = document.getElementById("root")!;
+const rootState = rootElement as typeof rootElement & {
+  __kindleCardsRoot?: ReturnType<typeof ReactDOM.createRoot>;
+};
+rootState.__kindleCardsRoot ??= ReactDOM.createRoot(rootElement);
+rootState.__kindleCardsRoot.render(
   <React.StrictMode>
     <App />
   </React.StrictMode>,

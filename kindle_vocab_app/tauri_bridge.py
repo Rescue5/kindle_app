@@ -9,10 +9,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from kindle_vocab_app import obsidian_sync, settings, vocab_cache
 from kindle_vocab_app.kindle_db import fetch_entries, list_books, validate_vocab_db
 from kindle_vocab_app.kindle_device import find_kindle_source
 from kindle_vocab_app.logging_config import configure_logging, get_logger
 from kindle_vocab_app.tsv_schema import OPTIMIZED_TSV_HEADER
+from kindle_vocab_app.vocab_cache import _build_books
 from kindle_vocab_app.vocab_optimizer import optimize_entries
 
 
@@ -44,15 +46,27 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
             return demo_state()
         source = find_kindle_source()
         if source is None:
+            cached = vocab_cache.load(workspace)
+            if cached is not None:
+                return cached
             return missing_kindle_state()
-            return demo_state(
-                source_name="Kindle не найден",
-                source_status="Подключите Kindle по USB. Пока показаны демонстрационные слова.",
-            )
         cache_dir = workspace / ".app-data" / "cache"
         db_path = source.copy_to_cache(cache_dir)
         validate_vocab_db(db_path)
-        return load_database_state(db_path, source.label)
+        fresh_state = load_database_state(db_path, source.label)
+        cached = vocab_cache.load(workspace)
+        if cached is not None:
+            merged_state = vocab_cache.merge(cached, fresh_state)
+        else:
+            merged_state = fresh_state
+        vocab_cache.save(workspace, merged_state)
+        return merged_state
+
+    if action == "load_cached":
+        cached = vocab_cache.load(workspace)
+        if cached is not None:
+            return cached
+        return demo_state()
 
     if action == "export":
         entries = list(payload.get("entries") or [])
@@ -81,6 +95,46 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
                 }
             ],
         }
+
+    if action == "load_settings":
+        app_settings = settings.load(workspace)
+        return settings.to_dict(app_settings)
+
+    if action == "save_cache":
+        vocab_cache.save(workspace, dict(payload.get("state") or {}))
+        return {"saved": True}
+
+    if action == "save_settings":
+        app_settings = settings.from_dict(payload.get("settings") or {})
+        settings.save(workspace, app_settings)
+        return {"saved": True}
+
+    if action == "load_obsidian":
+        vault_path = str(payload.get("vault_path") or "")
+        cards_path = str(payload.get("cards_path") or "")
+        if not vault_path or not cards_path:
+            raise ValueError("vault_path and cards_path are required")
+        cards_dir = Path(vault_path) / cards_path
+        entries = obsidian_sync.read_cards(cards_dir)
+        return {
+            "sourceName": "Obsidian",
+            "sourceStatus": f"Загружено {len(entries)} карточек",
+            "books": _build_books(entries),
+            "entries": entries,
+        }
+
+    if action == "sync_obsidian":
+        vault_path = str(payload.get("vault_path") or "")
+        cards_path = str(payload.get("cards_path") or "")
+        entries = list(payload.get("entries") or [])
+        backup_enabled = bool(payload.get("backup_enabled", True))
+        if not vault_path or not cards_path:
+            raise ValueError("vault_path and cards_path are required")
+        cards_dir = Path(vault_path) / cards_path
+        backups_dir = workspace / ".app-data" / "obsidian-backups"
+        return obsidian_sync.append_cards(
+            cards_dir, entries, backups_dir, backup_enabled=backup_enabled
+        )
 
     raise ValueError(f"Unsupported bridge action: {action}")
 
@@ -423,7 +477,7 @@ def _frequency_note(frequencies: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def demo_state(source_name: str = "Demo Kindle", source_status: str = "Preview data loaded") -> dict[str, Any]:
+def demo_state(source_name: str = "Demo Kindle", source_status: str = "Загружены демонстрационные данные") -> dict[str, Any]:
     entries = [
         {
             "word": "afraid",

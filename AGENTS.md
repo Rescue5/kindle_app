@@ -15,6 +15,27 @@ On Windows the Kindle may appear as either a mounted drive or an MTP/WPD device
 under "This PC > Kindle". The backend already has both paths covered; do not
 replace this with drive-letter-only detection.
 
+## Communication Rules
+
+- All agent-to-user communication must be in Russian.
+- This includes intermediate questions, confirmations, status updates, summaries,
+  and explanations of planned or performed actions.
+- If reasoning or source material is in another language, translate it to Russian
+  before presenting it to the user.
+- Code, commands, identifiers, file paths, and technical terms stay in their
+  original form.
+
+## Agent Orchestration
+
+- For multi-step or parallelizable work, spawn focused subagents rather than
+  doing everything in the parent thread.
+- Use `AgentSwarm` when the problem can be split into independent lanes with
+  distinct, non-overlapping scopes.
+- Give each subagent a clear, bounded responsibility and all the context it
+  needs; do not duplicate work across agents.
+- Prefer read-only exploration agents for investigation, coder agents for
+  file changes, and plan agents for architecture decisions.
+
 ## Stack
 
 - Desktop shell: Tauri v2.
@@ -81,19 +102,47 @@ python -m nltk.downloader -q wordnet omw-1.4 averaged_perceptron_tagger_eng punk
 - `kindle_vocab_app/llm_enricher.py` optionally enriches existing TSV rows
   through the DS Lab/OpenAI-compatible API.
 - `kindle_vocab_app/optimizer_cli.py` exposes optimizer and enrichment CLI modes.
+- `kindle_vocab_app/settings.py` persists application settings to
+  `.app-data/settings.json`.
+- `kindle_vocab_app/vocab_cache.py` persists the last loaded vocabulary state to
+  `.app-data/vocab_cache.json` so the library is available on restart.
+- `kindle_vocab_app/obsidian_sync.py` reads and writes Spaced Repetition cards in
+  Obsidian markdown format, handles priority-file mapping, and backs up the
+  Obsidian cards folder before writes.
 
 ## Backend Contracts
 
 The Tauri bridge currently supports these actions:
 
 - `scan`: find Kindle, copy `vocab.db` into `.app-data/cache`, validate it, and
-  return loaded vocabulary state. Falls back to demo state when no device is
-  found.
-- `load_demo`: return demo vocabulary state without touching a Kindle.
+  return loaded vocabulary state. Merges the result with any previously cached
+  state in `.app-data/vocab_cache.json`, preserving `processing_status` and
+  `analysis` for already-seen entries and skipping fresh entries whose base form
+  is already represented in the cache. Falls back to the cached state when no
+  device is found, and to demo state when there is neither a device nor a cache.
+- `load_demo`: return demo vocabulary state without touching a Kindle or cache.
+- `load_cached`: return the persisted vocabulary state from
+  `.app-data/vocab_cache.json`. Falls back to demo state when no cache exists.
+  The frontend calls this on startup so the last loaded vocabulary is available
+  immediately.
 - `optimize`: run `optimize_entries(...)` into `.app-data/optimized`, update
   `processed_snapshot.json`, write `optimized.tsv`, and emit per-entry analysis
   loaded from `word_analysis/*.json`.
 - `export`: write `.app-data/kindle-anki.tsv` or `.app-data/kindle-quizlet.tsv`.
+- `load_settings`: return the persisted `AppSettings` dict from
+  `.app-data/settings.json` (or defaults if missing).
+- `save_settings`: validate and persist a settings dict; returns `{"saved": true}`.
+- `load_obsidian`: parse Spaced Repetition cards from the configured Obsidian
+  vault path and return vocabulary state. Cards are treated as already processed.
+- `save_cache`: persist an arbitrary vocabulary state dict to
+  `.app-data/vocab_cache.json`. Used to keep the local cache in sync with
+  Obsidian so that Kindle scans can skip words already present in Obsidian and
+  so that falling back to local cache preserves Obsidian-processed entries.
+  Returns `{"saved": true}`.
+- `sync_obsidian`: append newly processed entries to the appropriate Obsidian
+  priority files, skipping unprocessed or low-importance words. Backs up the
+  Obsidian cards folder first (unless disabled in settings). Returns
+  `{"added", "skipped", "files", "backup_path"}`.
 
 Bridge output must be clean JSON on stdout. Do not add debug `print(...)` calls
 to stdout in bridge code; use logging/stderr/file logs. The Rust bridge forces

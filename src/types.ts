@@ -50,6 +50,20 @@ export type ActivityEvent = {
   meta?: string;
 };
 
+export type AppSettings = {
+  theme: "system" | "light" | "dark";
+  language: "ru" | "en";
+  default_export_format: "anki" | "quizlet";
+  app_data_path: string;
+  llm_enabled: boolean;
+  llm_model: string;
+  llm_base_url: string;
+  obsidian_sync_enabled: boolean;
+  obsidian_vault_path: string;
+  obsidian_cards_path: string;
+  obsidian_backup_enabled: boolean;
+};
+
 export type AppState = {
   sourceName: string;
   sourceStatus: string;
@@ -61,4 +75,6 @@ export type AppState = {
   searchText: string;
   entries: VocabEntry[];
   activityEvents: ActivityEvent[];
+  settings: AppSettings;
+  currentView: "library" | "settings";
 };

@@ -27,8 +27,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { tokens } from "@/design/tokens";
+import { SettingsView } from "@/components/settings-view";
 import { callBackend, initialState } from "@/lib/backend";
-import type { ActivityEvent, AppState, ProcessingStatus, VocabEntry, WordAnalysis } from "@/types";
+import type { ActivityEvent, AppSettings, AppState, BookOption, ProcessingStatus, VocabEntry, WordAnalysis } from "@/types";
 import "./index.css";
 
 type LoadResult = {
@@ -60,7 +61,7 @@ type StatusFilter = "all" | ProcessingStatus;
 type ExportFormat = "anki" | "quizlet";
 
 const stages = [
-  "Kindle sync",
+  "Синхронизация Kindle",
   "Извлечение контекста",
   "Нормализация",
   "Дедупликация",
@@ -72,11 +73,11 @@ const stages = [
 ] as const;
 
 const navItems = [
-  { label: "Библиотека", icon: Library, active: true, enabled: true },
+  { label: "Библиотека", icon: Library, view: "library" as const, enabled: true },
   { label: "Обработка", icon: FolderSync, enabled: false },
   { label: "Экспорты", icon: Archive, enabled: false },
   { label: "Аналитика", icon: BarChart3, enabled: false },
-  { label: "Настройки", icon: Settings, enabled: false },
+  { label: "Настройки", icon: Settings, view: "settings" as const, enabled: true },
 ];
 
 function App() {
@@ -96,7 +97,7 @@ function App() {
   const filteredEntries = React.useMemo(() => {
     const query = deferredSearchText.trim().toLowerCase();
     const selectedBook = state.books[state.selectedBookIndex];
-    return state.entries.filter((entry) => {
+    const filtered = state.entries.filter((entry) => {
       const bookMatch = matchesSelectedBook(entry, selectedBook?.key ?? "", selectedBook?.label ?? "");
       const statusMatch = statusFilter === "all" || entryStatus(entry) === statusFilter;
       const queryMatch =
@@ -105,6 +106,12 @@ function App() {
           (value || "").toLowerCase().includes(query),
       );
       return bookMatch && statusMatch && queryMatch;
+    });
+    return [...filtered].sort((a, b) => {
+      const aNew = isNewStatus(entryStatus(a));
+      const bNew = isNewStatus(entryStatus(b));
+      if (aNew !== bNew) return aNew ? -1 : 1;
+      return entryDateKey(b) - entryDateKey(a);
     });
   }, [state.entries, deferredSearchText, state.selectedBookIndex, state.books, statusFilter]);
 
@@ -127,18 +134,37 @@ function App() {
     return () => window.clearInterval(timer);
   }, [runState]);
 
+  React.useEffect(() => {
+    loadSettingsOnStartup();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const selectedEntry = filteredEntries.find((entry) => entry.id === selectedKey) ?? filteredEntries[0] ?? null;
   const busy = ["syncing", "processing", "exporting"].includes(runState);
 
-  async function runLoad(action: "scan" | "load_demo") {
-    const id = ++requestId.current;
-    setActiveStage(0);
-    setRunState(action === "scan" ? "syncing" : "waiting");
-    setLastError("");
-    setStatusFilter("all");
-    setState((current) => ({ ...current, processing: true, statusMessage: "Синхронизируем источник слов..." }));
+  async function loadSettingsOnStartup() {
     try {
-      const result = await callBackend<LoadResult>(action, {});
+      const settings = await callBackend<AppSettings>("load_settings", {});
+      setState((current) => ({ ...current, settings }));
+      const obsidianReady =
+        settings.obsidian_sync_enabled &&
+        settings.obsidian_vault_path.trim().length > 0 &&
+        settings.obsidian_cards_path.trim().length > 0;
+      if (obsidianReady) {
+        await loadObsidian(settings.obsidian_vault_path, settings.obsidian_cards_path);
+      } else {
+        await loadCachedOnStartup();
+      }
+    } catch (error) {
+      console.error("Failed to load settings", error);
+      await loadCachedOnStartup();
+    }
+  }
+
+  async function loadObsidian(vaultPath: string, cardsPath: string) {
+    const id = ++requestId.current;
+    try {
+      const result = await callBackend<LoadResult>("load_obsidian", { vault_path: vaultPath, cards_path: cardsPath });
       if (id !== requestId.current) return;
       const entries = normalizeEntries(result.entries);
       setState((current) => ({
@@ -146,7 +172,48 @@ function App() {
         ...result,
         entries,
         selectedBookIndex: 0,
-        processing: false,
+        dbLoaded: entries.length > 0,
+        statusMessage: entries.length ? "Словарь загружен из Obsidian." : "Словарь пуст",
+        activityEvents: [
+          {
+            phase: "answered",
+            title: "Obsidian готов",
+            message: `${entries.length} слов получено из ${Math.max(result.books.length - 1, 0)} книг.`,
+            meta: "Obsidian",
+          },
+          ...current.activityEvents,
+        ],
+      }));
+      setRunState(entries.length ? "waiting" : "disconnected");
+      try {
+        await callBackend<{ saved: boolean }>("save_cache", {
+          state: {
+            sourceName: result.sourceName,
+            sourceStatus: result.sourceStatus,
+            books: result.books,
+            entries,
+          },
+        });
+      } catch (saveError) {
+        console.error("Failed to mirror Obsidian state to local cache", saveError);
+      }
+    } catch (error) {
+      console.error("Failed to load Obsidian vocabulary", error);
+      await loadCachedOnStartup();
+    }
+  }
+
+  async function loadCachedOnStartup() {
+    const id = ++requestId.current;
+    try {
+      const result = await callBackend<LoadResult>("load_cached", {});
+      if (id !== requestId.current) return;
+      const entries = normalizeEntries(result.entries);
+      setState((current) => ({
+        ...current,
+        ...result,
+        entries,
+        selectedBookIndex: 0,
         dbLoaded: entries.length > 0,
         statusMessage: entries.length ? "Словарь загружен. Слова пока не обработаны." : "Словарь пуст",
         activityEvents: [
@@ -160,6 +227,61 @@ function App() {
         ],
       }));
       setRunState(entries.length ? "waiting" : "disconnected");
+    } catch (error) {
+      // Keep the initial demo state if cache loading fails.
+      console.error("Failed to load cached vocabulary", error);
+    }
+  }
+
+  async function runLoad(action: "scan" | "load_demo") {
+    const id = ++requestId.current;
+    const obsidianMode = state.settings.obsidian_sync_enabled;
+    setActiveStage(0);
+    setRunState(action === "scan" ? "syncing" : "waiting");
+    setLastError("");
+    setStatusFilter("all");
+    setState((current) => ({ ...current, processing: true, statusMessage: "Синхронизируем источник слов..." }));
+    try {
+      const result = await callBackend<LoadResult>(action, {});
+      if (id !== requestId.current) return;
+      const freshEntries = normalizeEntries(result.entries);
+      const mergedEntries = obsidianMode ? mergeVocabEntries(state.entries, freshEntries) : freshEntries;
+      const mergedBooks = obsidianMode ? buildBooksFromEntries(mergedEntries) : result.books;
+      setState((current) => ({
+        ...current,
+        sourceName: result.sourceName,
+        sourceStatus: result.sourceStatus,
+        books: mergedBooks,
+        entries: mergedEntries,
+        selectedBookIndex: 0,
+        processing: false,
+        dbLoaded: mergedEntries.length > 0,
+        statusMessage: mergedEntries.length ? "Словарь загружен. Слова пока не обработаны." : "Словарь пуст",
+        activityEvents: [
+          {
+            phase: "answered",
+            title: "Источник готов",
+            message: `${mergedEntries.length} слов получено из ${Math.max(mergedBooks.length - 1, 0)} книг.`,
+            meta: "Sync",
+          },
+          ...current.activityEvents,
+        ],
+      }));
+      setRunState(mergedEntries.length ? "waiting" : "disconnected");
+      if (obsidianMode && mergedEntries.length) {
+        try {
+          await callBackend<{ saved: boolean }>("save_cache", {
+            state: {
+              sourceName: result.sourceName,
+              sourceStatus: result.sourceStatus,
+              books: mergedBooks,
+              entries: mergedEntries,
+            },
+          });
+        } catch (saveError) {
+          console.error("Failed to mirror merged Obsidian state to local cache", saveError);
+        }
+      }
     } catch (error) {
       fail("Не удалось синхронизировать Kindle", String(error));
     }
@@ -282,6 +404,74 @@ function App() {
     }
   }
 
+  async function runSyncObsidian() {
+    const { obsidian_vault_path, obsidian_cards_path } = state.settings;
+    if (!state.settings.obsidian_sync_enabled || !obsidian_vault_path.trim() || !obsidian_cards_path.trim()) {
+      fail("Obsidian не настроен", "Укажите путь к хранилищу и папку для карточек в настройках.");
+      return;
+    }
+    const submitted = filteredEntries;
+    if (!submitted.length) {
+      fail("Нет слов для синхронизации", "Выберите книгу или снимите фильтры.");
+      return;
+    }
+    const id = ++requestId.current;
+    setRunState("syncing");
+    setLastError("");
+    setState((current) => ({ ...current, processing: true, statusMessage: "Синхронизируем карточки с Obsidian…" }));
+    try {
+      const result = await callBackend<{ added: number; skipped: number; files: string[]; backup_path: string }>(
+        "sync_obsidian",
+        { vault_path: obsidian_vault_path, cards_path: obsidian_cards_path, entries: submitted },
+      );
+      if (id !== requestId.current) return;
+      const syncable = submitted.filter((entry) => {
+        if (entry.processing_status !== "processed") return false;
+        if (entry.analysis?.accepted === false) return false;
+        const score = entry.analysis?.importance_score;
+        if (typeof score !== "number") return false;
+        return score >= 3 && score <= 10;
+      });
+      const syncedIds = new Set(syncable.map((entry) => entry.id));
+      setRunState("waiting");
+      setState((current) => ({
+        ...current,
+        processing: false,
+        statusMessage: `Obsidian: добавлено ${result.added}, пропущено ${result.skipped}`,
+        entries: current.entries.map((entry) =>
+          syncedIds.has(entry.id) ? { ...entry, export_status: "exported" } : entry,
+        ),
+        activityEvents: [
+          {
+            phase: "answered",
+            title: "Синхронизация с Obsidian",
+            message: `Добавлено: ${result.added}; пропущено: ${result.skipped}; файлов: ${result.files.length}.`,
+            meta: result.backup_path,
+          },
+          ...current.activityEvents,
+        ],
+      }));
+    } catch (error) {
+      fail("Ошибка синхронизации с Obsidian", String(error));
+    }
+  }
+
+  async function toggleObsidianSync() {
+    const nextEnabled = !state.settings.obsidian_sync_enabled;
+    const nextSettings = { ...state.settings, obsidian_sync_enabled: nextEnabled };
+    setState((current) => ({ ...current, settings: nextSettings }));
+    try {
+      await callBackend<{ saved: boolean }>("save_settings", { settings: nextSettings });
+      if (nextEnabled) {
+        await loadObsidian(nextSettings.obsidian_vault_path, nextSettings.obsidian_cards_path);
+      } else {
+        await loadCachedOnStartup();
+      }
+    } catch (error) {
+      fail("Ошибка сохранения настроек", String(error));
+    }
+  }
+
   function cancelCurrent() {
     requestId.current += 1;
     setRunState("cancelled");
@@ -311,46 +501,71 @@ function App() {
   return (
     <main className="premium-grid h-full overflow-hidden text-foreground">
       <div className="grid h-full min-h-0 min-w-0 grid-cols-[208px_minmax(0,1fr)_320px] gap-0">
-        <Sidebar state={state} runState={runState} onScan={() => runLoad("scan")} />
+        <Sidebar
+          state={state}
+          runState={runState}
+          onNavigate={(view) => setState((current) => ({ ...current, currentView: view }))}
+        />
         <section className="flex min-h-0 min-w-0 flex-col border-x border-line/80">
-          <TopBar
-            state={state}
-            setState={setState}
-            runState={runState}
-            busy={busy}
-            total={filteredEntries.length}
-            counts={counts}
-            statusFilter={statusFilter}
-            setStatusFilter={setStatusFilter}
-            exportFormat={exportFormat}
-            setExportFormat={setExportFormat}
-            onScan={() => runLoad("scan")}
-            onOptimize={runOptimize}
-            onExport={runExport}
-            onCancel={cancelCurrent}
-          />
-          <StatusStrip
-            state={state}
-            runState={runState}
-            lastError={lastError}
-            onRetry={() => runLoad("scan")}
-            onDismiss={() => {
-              setRunState("waiting");
-              setLastError("");
-            }}
-          />
-          <VocabularyList entries={filteredEntries} selectedKey={selectedKey} onSelect={setSelectedKey} />
+          {state.currentView === "settings" ? (
+            <SettingsView
+              settings={state.settings}
+              onChange={(settings) => setState((current) => ({ ...current, settings }))}
+            />
+          ) : (
+            <>
+              <TopBar
+                state={state}
+                setState={setState}
+                runState={runState}
+                busy={busy}
+                total={filteredEntries.length}
+                counts={counts}
+                statusFilter={statusFilter}
+                setStatusFilter={setStatusFilter}
+                exportFormat={exportFormat}
+                setExportFormat={setExportFormat}
+                onScan={() => runLoad("scan")}
+                onOptimize={runOptimize}
+                onExport={runExport}
+                onSyncObsidian={runSyncObsidian}
+                onToggleObsidian={toggleObsidianSync}
+                onCancel={cancelCurrent}
+              />
+              <StatusStrip
+                state={state}
+                runState={runState}
+                lastError={lastError}
+                onRetry={() => runLoad("scan")}
+                onDismiss={() => {
+                  setRunState("waiting");
+                  setLastError("");
+                }}
+              />
+              <VocabularyList entries={filteredEntries} selectedKey={selectedKey} onSelect={setSelectedKey} />
+            </>
+          )}
         </section>
-        <aside className="flex min-h-0 min-w-0 flex-col bg-panel/70">
-          <WordInspector entry={selectedEntry} onClose={() => setSelectedKey("")} />
-          <ProcessingPipeline runState={runState} activeStage={activeStage} entry={selectedEntry} events={state.activityEvents} />
-        </aside>
+        {state.currentView === "settings" ? null : (
+          <aside className="flex min-h-0 min-w-0 flex-col bg-panel/70">
+            <WordInspector entry={selectedEntry} onClose={() => setSelectedKey("")} />
+            <ProcessingPipeline runState={runState} activeStage={activeStage} entry={selectedEntry} events={state.activityEvents} />
+          </aside>
+        )}
       </div>
     </main>
   );
 }
 
-function Sidebar({ state, runState, onScan }: { state: AppState; runState: RunState; onScan: () => void }) {
+function Sidebar({
+  state,
+  runState,
+  onNavigate,
+}: {
+  state: AppState;
+  runState: RunState;
+  onNavigate: (view: "library" | "settings") => void;
+}) {
   const connected = runState !== "disconnected" && runState !== "error";
   return (
     <aside className="flex min-h-0 flex-col bg-panel px-3 py-4">
@@ -359,21 +574,25 @@ function Sidebar({ state, runState, onScan }: { state: AppState; runState: RunSt
         <div className="text-sm font-semibold">Словарь</div>
       </div>
       <nav className="space-y-1">
-        {navItems.map((item) => (
-          <button
-            key={item.label}
-            disabled={!item.enabled}
-            title={item.enabled ? item.label : "Раздел будет подключён позже"}
-            className={`flex h-10 w-full items-center gap-3 rounded-[10px] px-3 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-45 ${
-              item.active
-                ? "bg-secondary text-foreground"
-                : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground active:bg-secondary"
-            }`}
-          >
-            <item.icon size={16} />
-            {item.label}
-          </button>
-        ))}
+        {navItems.map((item) => {
+          const active = item.view ? state.currentView === item.view : false;
+          return (
+            <button
+              key={item.label}
+              disabled={!item.enabled}
+              title={item.enabled ? item.label : "Раздел будет подключён позже"}
+              onClick={() => item.view && onNavigate(item.view)}
+              className={`flex h-10 w-full items-center gap-3 rounded-[10px] px-3 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-45 ${
+                active
+                  ? "bg-secondary text-foreground"
+                  : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground active:bg-secondary"
+              }`}
+            >
+              <item.icon size={16} />
+              {item.label}
+            </button>
+          );
+        })}
       </nav>
       <div className="mt-auto rounded-[12px] border border-line bg-panel-raised p-3">
         <div className="mb-3 flex items-center gap-3">
@@ -388,10 +607,6 @@ function Sidebar({ state, runState, onScan }: { state: AppState; runState: RunSt
             </div>
           </div>
         </div>
-        <Button className="w-full" variant="secondary" onClick={onScan} data-loading={runState === "syncing"}>
-          {runState === "syncing" ? <Loader2 size={15} className="animate-spin" /> : <FolderSync size={15} />}
-          Синхронизировать
-        </Button>
         <div className="mt-4 grid grid-cols-2 gap-3 border-t border-line pt-3 text-xs">
           <div>
             <div className="text-muted-foreground">Книги</div>
@@ -421,6 +636,8 @@ function TopBar({
   onScan,
   onOptimize,
   onExport,
+  onSyncObsidian,
+  onToggleObsidian,
   onCancel,
 }: {
   state: AppState;
@@ -436,8 +653,16 @@ function TopBar({
   onScan: () => void;
   onOptimize: () => void;
   onExport: () => void;
+  onSyncObsidian: () => void;
+  onToggleObsidian: () => void;
   onCancel: () => void;
 }) {
+  const obsidianMode = state.settings.obsidian_sync_enabled;
+  const obsidianReady =
+    obsidianMode &&
+    state.settings.obsidian_vault_path.trim().length > 0 &&
+    state.settings.obsidian_cards_path.trim().length > 0;
+  const connected = runState !== "disconnected" && runState !== "error";
   return (
     <header className="flex-none border-b border-line bg-background/35 px-5 py-4">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
@@ -452,9 +677,39 @@ function TopBar({
               Отменить
             </Button>
           ) : null}
-          <Button variant="secondary" onClick={onScan} disabled={busy} data-loading={runState === "syncing"}>
+          <Button
+            variant="secondary"
+            onClick={onScan}
+            disabled={busy}
+            title="Сканировать подключённый Kindle"
+            data-loading={runState === "syncing"}
+            className={
+              connected
+                ? "animate-kindle-glow border-sky-500/50 bg-sky-500/10 text-sky-200 hover:border-sky-400/60 hover:bg-sky-500/20 hover:text-sky-100 focus-visible:ring-sky-500/50"
+                : ""
+            }
+          >
             {runState === "syncing" ? <Loader2 size={15} className="animate-spin" /> : <FolderSync size={15} />}
             Kindle
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onToggleObsidian}
+            disabled={busy}
+            title={
+              obsidianMode
+                ? "Отключить синхронизацию с Obsidian и вернуться к локальному словарю"
+                : "Включить синхронизацию с Obsidian"
+            }
+            className={
+              obsidianMode
+                ? "animate-obsidian-glow border-purple-500/50 bg-purple-500/10 text-purple-200 hover:border-purple-400/60 hover:bg-purple-500/20 hover:text-purple-100 focus-visible:ring-purple-500/50"
+                : ""
+            }
+          >
+            <Database size={15} className={obsidianMode ? "text-purple-300" : ""} />
+            <span className="hidden sm:inline">Obsidian</span>
           </Button>
           <Button onClick={onOptimize} disabled={!total || busy} data-loading={runState === "processing"}>
             {runState === "processing" ? <Loader2 size={15} className="animate-spin" /> : <SlidersHorizontal size={15} />}
@@ -490,10 +745,32 @@ function TopBar({
           <option value="anki">Anki</option>
           <option value="quizlet">Quizlet</option>
         </Select>
-        <Button variant="secondary" onClick={onExport} disabled={busy || !total}>
-          <Download size={15} />
-          Экспорт
-        </Button>
+        {obsidianMode ? (
+          <div className="inline-flex overflow-hidden rounded-[10px] border border-purple-500/40 shadow-[0_0_14px_rgba(168,85,247,0.12)]">
+            <Button
+              variant="secondary"
+              onClick={onExport}
+              disabled={busy || !total}
+              className="rounded-none rounded-l-[10px] border-0 border-r border-purple-500/30 bg-secondary/70 pr-3 hover:bg-secondary focus-visible:z-10"
+            >
+              <Download size={15} />
+              Экспорт
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={onSyncObsidian}
+              disabled={busy || !obsidianReady}
+              className="rounded-none rounded-r-[10px] border-0 bg-purple-500/10 px-3 text-purple-200 hover:bg-purple-500/20 hover:text-purple-100 focus-visible:z-10 focus-visible:ring-purple-500/50"
+            >
+              Obsidian
+            </Button>
+          </div>
+        ) : (
+          <Button variant="secondary" onClick={onExport} disabled={busy || !total}>
+            <Download size={15} />
+            Экспорт
+          </Button>
+        )}
       </div>
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <div className="flex flex-wrap items-center gap-2">
@@ -959,6 +1236,35 @@ function normalizeEntries(entries: VocabEntry[]): VocabEntry[] {
   });
 }
 
+function mergeVocabEntries(existing: VocabEntry[], incoming: VocabEntry[]): VocabEntry[] {
+  const seen = new Set(existing.map((entry) => getBaseForm(entry)));
+  const merged = [...existing];
+  for (const entry of incoming) {
+    const base = getBaseForm(entry);
+    if (!seen.has(base)) {
+      merged.push({ ...entry, id: entry.id || stableEntryId(entry) });
+      seen.add(base);
+    }
+  }
+  return normalizeEntries(merged);
+}
+
+function buildBooksFromEntries(entries: VocabEntry[]): BookOption[] {
+  const counts = entries.reduce(
+    (acc, entry) => acc.set(entry.book_key, (acc.get(entry.book_key) ?? 0) + 1),
+    new Map<string, number>(),
+  );
+  const keys = Array.from(new Set(entries.map((entry) => entry.book_key)));
+  return [
+    { label: "Все книги", key: "" },
+    ...keys.map((key) => {
+      const representative = entries.find((entry) => entry.book_key === key);
+      const title = representative?.book_title || key;
+      return { label: `${title} · ${counts.get(key) ?? 0}`, key };
+    }),
+  ];
+}
+
 function stableEntryId(entry: VocabEntry) {
   return [entry.word, entry.stem, entry.context, entry.book_key, entry.book_title, entry.looked_up_at].join("|");
 }
@@ -972,6 +1278,27 @@ function matchesSelectedBook(entry: VocabEntry, selectedKey: string, selectedLab
 
 function entryStatus(entry: VocabEntry): ProcessingStatus {
   return entry.processing_status || "raw";
+}
+
+const NEW_STATUSES = new Set<ProcessingStatus>(["raw", "processing", "failed"]);
+
+function isNewStatus(status: ProcessingStatus): boolean {
+  return NEW_STATUSES.has(status);
+}
+
+function entryDateKey(entry: VocabEntry): number {
+  const value = entry.looked_up_at?.trim() || "";
+  const parsed = value ? Date.parse(value) : NaN;
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function getBaseForm(entry: VocabEntry): string {
+  const raw =
+    entry.analysis?.base_form?.trim() ||
+    entry.stem?.trim() ||
+    entry.word?.trim() ||
+    entry.id;
+  return raw.toLowerCase().replace(/\s+/g, " ");
 }
 
 function isExportableEntry(entry: VocabEntry) {

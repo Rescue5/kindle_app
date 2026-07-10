@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActivityEvent, AppState, BookOption, VocabEntry } from "@/types";
+import type { ActivityEvent, AppSettings, AppState, BookOption, VocabEntry } from "@/types";
 
 function rawEntry(entry: Omit<VocabEntry, "id" | "processing_status" | "export_status">): VocabEntry {
   const id = [entry.word, entry.book_key, entry.looked_up_at, entry.context].join("|");
@@ -152,6 +152,20 @@ const demoEvents: ActivityEvent[] = [
   },
 ];
 
+export const defaultSettings: AppSettings = {
+  theme: "system",
+  language: "ru",
+  default_export_format: "anki",
+  app_data_path: ".app-data",
+  llm_enabled: false,
+  llm_model: "deepseek-v4-flash",
+  llm_base_url: "https://api.dslab.tech/v1",
+  obsidian_sync_enabled: false,
+  obsidian_vault_path: "",
+  obsidian_cards_path: "cards/Book Vocab",
+  obsidian_backup_enabled: true,
+};
+
 export const initialState: AppState = {
   sourceName: "Preview workspace",
   sourceStatus: "Kindle не подключён · показаны демонстрационные слова",
@@ -163,6 +177,8 @@ export const initialState: AppState = {
   searchText: "",
   entries: demoEntries,
   activityEvents: demoEvents,
+  settings: defaultSettings,
+  currentView: "library",
 };
 
 export async function callBackend<T>(action: string, payload: unknown): Promise<T> {
@@ -174,7 +190,24 @@ export async function callBackend<T>(action: string, payload: unknown): Promise<
 
 async function mockBackend<T>(action: string, payload: unknown): Promise<T> {
   await new Promise((resolve) => setTimeout(resolve, 320));
-  if (action === "scan" || action === "load_demo") {
+  if (action === "load_settings") {
+    return { ...defaultSettings } as T;
+  }
+  if (action === "save_settings") {
+    return { saved: true } as T;
+  }
+  if (action === "load_obsidian") {
+    return {
+      sourceName: "Demo Obsidian vault",
+      sourceStatus: "Preview-словарь загружен из Obsidian",
+      books: demoBooks,
+      entries: demoEntries.map((entry) => ({ ...entry, processing_status: "processed", analysis: undefined })),
+    } as T;
+  }
+  if (action === "sync_obsidian") {
+    return { added: 0, skipped: 0, files: [], backup_path: "preview/backup" } as T;
+  }
+  if (action === "scan" || action === "load_demo" || action === "load_cached") {
     return {
       sourceName: action === "scan" ? "Demo Kindle Paperwhite" : "Demo Kindle",
       sourceStatus: "Preview-словарь загружен",

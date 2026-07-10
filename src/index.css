@@ -96,4 +96,30 @@
     content-visibility: auto;
     contain-intrinsic-size: 45px;
   }
+
+  @keyframes obsidian-glow {
+    0%, 100% {
+      box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.35), 0 0 12px rgba(168, 85, 247, 0.22);
+    }
+    50% {
+      box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.5), 0 0 20px rgba(168, 85, 247, 0.35);
+    }
+  }
+
+  .animate-obsidian-glow {
+    animation: obsidian-glow 2.5s ease-in-out infinite;
+  }
+
+  @keyframes kindle-glow {
+    0%, 100% {
+      box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35), 0 0 12px rgba(56, 189, 248, 0.22);
+    }
+    50% {
+      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.5), 0 0 20px rgba(56, 189, 248, 0.35);
+    }
+  }
+
+  .animate-kindle-glow {
+    animation: kindle-glow 2.5s ease-in-out infinite;
+  }
 }

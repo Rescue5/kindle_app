@@ -25,6 +25,19 @@ replace this with drive-letter-only detection.
 - Code, commands, identifiers, file paths, and technical terms stay in their
   original form.
 
+## Work Log
+
+- Before inspecting or changing the project, read `WORKLOG.md` from the repository
+  root so current decisions and unfinished work are not lost.
+- `WORKLOG.md` is append-only. Never rewrite, reorder, or delete previous entries.
+- Every agent, including delegated agents, must append its own dated entry for
+  each logical batch of work. Record the goal, decisions, changed files, checks,
+  failures, remaining risks, and commit hashes when available.
+- Do not record API keys, `.env` values, private vocabulary contents, full user
+  paths, or other sensitive local data in the work log.
+- User instructions about whether delegation is allowed always override the
+  orchestration defaults below.
+
 ## Agent Orchestration
 
 - For multi-step or parallelizable work, spawn focused subagents rather than

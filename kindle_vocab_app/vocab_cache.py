@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from kindle_vocab_app.logging_config import get_logger
 
 
 logger = get_logger(__name__)
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 CACHE_FILENAME = "vocab_cache.json"
 
 
@@ -23,37 +25,55 @@ def cache_path(workspace: Path) -> Path:
     return workspace / ".app-data" / CACHE_FILENAME
 
 
+def empty_catalog() -> dict[str, Any]:
+    return {
+        "version": CACHE_VERSION,
+        "cached_at": utc_now(),
+        "last_kindle_sync_id": "",
+        "lexemes": [],
+    }
+
+
 def load(workspace: Path) -> dict[str, Any] | None:
-    """Load the cached vocabulary state if it exists and is valid."""
     path = cache_path(workspace)
     if not path.exists():
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        logger.exception("Failed to read vocab cache path=%s", path)
+        logger.exception("Failed to read vocabulary catalog path=%s", path)
         return None
-    if data.get("version") != CACHE_VERSION:
-        logger.warning(
-            "Vocab cache version mismatch path=%s version=%s expected=%s",
+
+    version = int(data.get("version") or 1)
+    if version == CACHE_VERSION:
+        data["lexemes"] = [_normalize_lexeme(item) for item in data.get("lexemes") or []]
+        return data
+    if version == 1:
+        migrated = migrate_v1(data)
+        backup = path.with_suffix(path.suffix + ".v1.bak")
+        if not backup.exists():
+            shutil.copy2(path, backup)
+        save(workspace, migrated)
+        logger.info(
+            "Migrated vocabulary catalog path=%s backup=%s entries=%d lexemes=%d",
             path,
-            data.get("version"),
-            CACHE_VERSION,
+            backup,
+            len(data.get("entries") or []),
+            len(migrated["lexemes"]),
         )
-        return None
-    return data
+        return migrated
+
+    logger.warning("Unsupported vocabulary catalog version path=%s version=%s", path, version)
+    return None
 
 
-def save(workspace: Path, state: dict[str, Any]) -> None:
-    """Persist the vocabulary state to disk atomically."""
+def save(workspace: Path, catalog: dict[str, Any]) -> None:
     path = cache_path(workspace)
     payload = {
         "version": CACHE_VERSION,
         "cached_at": utc_now(),
-        "sourceName": state.get("sourceName", ""),
-        "sourceStatus": state.get("sourceStatus", ""),
-        "books": state.get("books", []),
-        "entries": state.get("entries", []),
+        "last_kindle_sync_id": str(catalog.get("last_kindle_sync_id") or ""),
+        "lexemes": [_normalize_lexeme(item) for item in catalog.get("lexemes") or []],
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -62,100 +82,267 @@ def save(workspace: Path, state: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
-    logger.info(
-        "Saved vocab cache path=%s entries=%d books=%d",
-        path,
-        len(payload["entries"]),
-        len(payload["books"]),
-    )
+    logger.info("Saved vocabulary catalog path=%s lexemes=%d", path, len(payload["lexemes"]))
 
 
-def _normalize_base(value: str) -> str:
-    text = str(value or "").strip().lower()
-    text = re.sub(r"\s+", " ", text)
-    return text
-
-
-def _base_key(entry: dict[str, Any]) -> str:
-    analysis = entry.get("analysis") or {}
-    candidate = str(analysis.get("base_form") or "").strip()
-    if not candidate:
-        candidate = str(entry.get("stem") or "").strip()
-    if not candidate:
-        candidate = str(entry.get("word") or "").strip()
-    if not candidate:
-        candidate = str(entry.get("id") or "").strip()
-    return _normalize_base(candidate)
-
-
-def merge(cached: dict[str, Any], fresh: dict[str, Any]) -> dict[str, Any]:
-    """Combine fresh Kindle data with cached state, preserving processing progress."""
-    cached_entries = list(cached.get("entries") or [])
-    fresh_entries = list(fresh.get("entries") or [])
-
-    entry_by_id: dict[str, dict[str, Any]] = {
-        entry["id"]: entry for entry in cached_entries if entry.get("id")
-    }
-    seen_base = {_base_key(entry) for entry in entry_by_id.values()}
-
-    for entry in fresh_entries:
-        entry_id = entry.get("id")
-        if not entry_id:
+def migrate_v1(data: dict[str, Any]) -> dict[str, Any]:
+    catalog = empty_catalog()
+    for entry in data.get("entries") or []:
+        if not isinstance(entry, dict):
             continue
-        if entry_id in entry_by_id:
-            old = entry_by_id[entry_id]
-            entry["processing_status"] = old.get(
-                "processing_status", entry.get("processing_status", "raw")
-            )
-            entry["analysis"] = old.get("analysis", entry.get("analysis"))
-            entry["export_status"] = old.get(
-                "export_status", entry.get("export_status", "none")
-            )
-            entry_by_id[entry_id] = entry
-            continue
-
-        base = _base_key(entry)
-        if base in seen_base:
-            continue
-
-        entry_by_id[entry_id] = entry
-        seen_base.add(base)
-
-    merged_entries = list(entry_by_id.values())
-    books = _build_books(merged_entries)
-
-    return {
-        "sourceName": fresh.get("sourceName", cached.get("sourceName", "")),
-        "sourceStatus": fresh.get("sourceStatus", cached.get("sourceStatus", "")),
-        "books": books,
-        "entries": merged_entries,
-    }
+        _merge_entry(catalog, entry, source="legacy", kindle_sync_id="", mark_new=False)
+    return catalog
 
 
-def _build_books(entries: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Rebuild the book list from entries with accurate counts."""
-    books: list[dict[str, str]] = [{"label": "Все книги", "key": ""}]
-    counts: dict[tuple[str, str], int] = {}
-    titles: dict[tuple[str, str], str] = {}
+def merge_kindle(
+    catalog: dict[str, Any],
+    entries: Iterable[dict[str, Any]],
+    *,
+    sync_id: str,
+    mark_new: bool = True,
+) -> dict[str, Any]:
+    catalog = _copy_catalog(catalog)
+    existing_ids = {str(item.get("id") or "") for item in catalog["lexemes"]}
+    if mark_new:
+        for lexeme in catalog["lexemes"]:
+            if lexeme.get("freshness") == "new":
+                lexeme["freshness"] = "known"
 
     for entry in entries:
-        key = str(entry.get("book_key") or "")
-        title = str(entry.get("book_title") or "Unknown book")
-        authors = str(entry.get("authors") or "")
-        book_key = (key, authors)
-        counts[book_key] = counts.get(book_key, 0) + 1
-        titles[book_key] = title
+        key = lexical_key(entry)
+        candidate_id = lexeme_id(str(entry.get("language") or "en"), key)
+        is_new_lexeme = candidate_id not in existing_ids
+        _merge_entry(
+            catalog,
+            entry,
+            source="kindle",
+            kindle_sync_id=sync_id,
+            mark_new=mark_new and is_new_lexeme,
+        )
+        existing_ids.add(candidate_id)
 
-    def sort_key(item: tuple[tuple[str, str], int]) -> tuple[str, str]:
-        (key, authors), _ = item
-        title = titles.get((key, authors), "Unknown book")
-        return (title.lower(), authors.lower())
+    if mark_new:
+        catalog["last_kindle_sync_id"] = sync_id
+    return catalog
 
-    for (key, authors), count in sorted(counts.items(), key=sort_key):
-        label = titles.get((key, authors), "Unknown book")
-        if authors:
-            label += f" · {authors}"
-        label += f" · {count}"
-        books.append({"label": label, "key": key})
 
+def merge_obsidian(catalog: dict[str, Any], entries: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    catalog = _copy_catalog(catalog)
+    for entry in entries:
+        _merge_entry(catalog, entry, source="obsidian", kindle_sync_id="", mark_new=False)
+    return catalog
+
+
+def lexical_key(entry: dict[str, Any]) -> str:
+    analysis = entry.get("analysis") or {}
+    value = analysis.get("base_form") or entry.get("lemma") or entry.get("stem") or entry.get("word") or entry.get("id")
+    return normalize_lemma(str(value or ""))
+
+
+def normalize_lemma(value: str) -> str:
+    text = value.strip().replace("’", "'").replace("`", "'").casefold()
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" .,:;!?\"'()[]{}")
+
+
+def lexeme_id(language: str, key: str) -> str:
+    raw = f"{language.casefold()}|{key.casefold()}"
+    return hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()
+
+
+def occurrence_id(entry: dict[str, Any], source: str) -> str:
+    raw = "|".join(
+        [
+            source,
+            str(entry.get("word") or ""),
+            str(entry.get("context") or ""),
+            str(entry.get("book_key") or ""),
+            str(entry.get("book_title") or ""),
+            str(entry.get("looked_up_at") or ""),
+        ]
+    )
+    return hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()
+
+
+def books_from_lexemes(lexemes: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
+    counts: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for lexeme in lexemes:
+        seen_for_lexeme: set[str] = set()
+        for occurrence in lexeme.get("occurrences") or []:
+            key = str(occurrence.get("book_key") or occurrence.get("book_title") or "")
+            if not key or key in seen_for_lexeme:
+                continue
+            seen_for_lexeme.add(key)
+            counts[key] = counts.get(key, 0) + 1
+            title = str(occurrence.get("book_title") or key)
+            authors = str(occurrence.get("authors") or "")
+            labels[key] = f"{title} · {authors}" if authors else title
+    books = [{"label": "Все книги", "key": ""}]
+    for key in sorted(counts, key=lambda item: labels[item].casefold()):
+        books.append({"label": f"{labels[key]} · {counts[key]}", "key": key})
     return books
+
+
+def frontend_state(catalog: dict[str, Any], *, source_name: str = "Local library", source_status: str = "") -> dict[str, Any]:
+    lexemes = [_normalize_lexeme(item) for item in catalog.get("lexemes") or []]
+    return {
+        "sourceName": source_name,
+        "sourceStatus": source_status,
+        "books": books_from_lexemes(lexemes),
+        "entries": lexemes,
+        "last_kindle_sync_id": str(catalog.get("last_kindle_sync_id") or ""),
+    }
+
+
+def _merge_entry(
+    catalog: dict[str, Any],
+    entry: dict[str, Any],
+    *,
+    source: str,
+    kindle_sync_id: str,
+    mark_new: bool,
+) -> None:
+    key = lexical_key(entry)
+    if not key:
+        return
+    language = str(entry.get("language") or "en")
+    item_id = lexeme_id(language, key)
+    by_id = {str(item.get("id") or ""): item for item in catalog["lexemes"]}
+    lexeme = by_id.get(item_id)
+    if lexeme is None:
+        lexeme = next(
+            (
+                item
+                for item in catalog["lexemes"]
+                if normalize_lemma(str(item.get("lemma") or "")) == key
+                or key in {normalize_lemma(str(form)) for form in item.get("forms") or []}
+            ),
+            None,
+        )
+    existing_lexeme = lexeme
+    now = utc_now()
+    if lexeme is None:
+        lexeme = _new_lexeme(entry, item_id, key, source, kindle_sync_id, mark_new, now)
+        catalog["lexemes"].append(lexeme)
+    else:
+        lexeme = _normalize_lexeme(lexeme)
+        index = catalog["lexemes"].index(existing_lexeme)
+        catalog["lexemes"][index] = lexeme
+        lexeme["last_seen_at"] = now
+        lexeme["sources"][source] = True
+        if source == "kindle" and kindle_sync_id:
+            lexeme["last_kindle_sync_id"] = kindle_sync_id
+
+    word = str(entry.get("word") or entry.get("display_form") or key).strip()
+    if word and word not in lexeme["forms"]:
+        lexeme["forms"].append(word)
+    occurrence = _occurrence_from_entry(entry, source)
+    if occurrence["id"] not in {item["id"] for item in lexeme["occurrences"]}:
+        lexeme["occurrences"].append(occurrence)
+
+    if source == "obsidian":
+        lexeme["freshness"] = "known"
+        lexeme["sources"]["obsidian"] = True
+        lexeme["destinations"]["obsidian"] = {
+            "state": "synced",
+            "reason": "",
+            "last_synced_at": now,
+        }
+        analysis = entry.get("analysis") or {}
+        lexeme["processing"] = {
+            "state": "ready",
+            "analysis": analysis,
+            "updated_at": str(analysis.get("processed_at") or now),
+            "error": "",
+        }
+        lemma = normalize_lemma(str(analysis.get("base_form") or entry.get("stem") or word))
+        if lemma:
+            lexeme["lemma"] = lemma
+    elif source == "legacy":
+        _apply_legacy_state(lexeme, entry, now)
+
+
+def _new_lexeme(
+    entry: dict[str, Any],
+    item_id: str,
+    key: str,
+    source: str,
+    kindle_sync_id: str,
+    mark_new: bool,
+    now: str,
+) -> dict[str, Any]:
+    word = str(entry.get("word") or key).strip()
+    return {
+        "id": item_id,
+        "lemma": key,
+        "display_form": word or key,
+        "language": str(entry.get("language") or "en"),
+        "forms": [word] if word else [],
+        "occurrences": [],
+        "freshness": "new" if mark_new else "known",
+        "processing": {"state": "pending", "analysis": None, "updated_at": "", "error": ""},
+        "sources": {"kindle": source == "kindle", "obsidian": source == "obsidian", "legacy": source == "legacy"},
+        "destinations": {
+            "obsidian": {"state": "not_synced", "reason": "", "last_synced_at": ""},
+            "anki": {"state": "not_exported", "last_exported_at": ""},
+            "quizlet": {"state": "not_exported", "last_exported_at": ""},
+        },
+        "first_seen_at": now,
+        "last_seen_at": now,
+        "last_kindle_sync_id": kindle_sync_id,
+    }
+
+
+def _apply_legacy_state(lexeme: dict[str, Any], entry: dict[str, Any], now: str) -> None:
+    status = str(entry.get("processing_status") or "raw")
+    state = {
+        "raw": "pending",
+        "processing": "pending",
+        "processed": "ready",
+        "rejected": "rejected",
+        "failed": "failed",
+        "skipped": "ready" if entry.get("analysis") else "pending",
+    }.get(status, "pending")
+    analysis = entry.get("analysis") if state in {"ready", "rejected"} else None
+    current = lexeme.get("processing") or {}
+    if current.get("state") not in {"ready", "rejected"} or state in {"ready", "rejected"}:
+        lexeme["processing"] = {"state": state, "analysis": analysis, "updated_at": now, "error": ""}
+
+
+def _occurrence_from_entry(entry: dict[str, Any], source: str) -> dict[str, Any]:
+    return {
+        "id": occurrence_id(entry, source),
+        "source": source,
+        "word": str(entry.get("word") or entry.get("display_form") or ""),
+        "context": str(entry.get("context") or ""),
+        "book_key": str(entry.get("book_key") or ""),
+        "book_title": str(entry.get("book_title") or ""),
+        "authors": str(entry.get("authors") or ""),
+        "looked_up_at": str(entry.get("looked_up_at") or ""),
+    }
+
+
+def _normalize_lexeme(item: dict[str, Any]) -> dict[str, Any]:
+    item = dict(item)
+    item.setdefault("forms", [])
+    item.setdefault("occurrences", [])
+    item.setdefault("freshness", "known")
+    item.setdefault("processing", {"state": "pending", "analysis": None, "updated_at": "", "error": ""})
+    item.setdefault("sources", {"kindle": False, "obsidian": False, "legacy": True})
+    item.setdefault("destinations", {})
+    item["destinations"].setdefault("obsidian", {"state": "not_synced", "reason": "", "last_synced_at": ""})
+    item["destinations"].setdefault("anki", {"state": "not_exported", "last_exported_at": ""})
+    item["destinations"].setdefault("quizlet", {"state": "not_exported", "last_exported_at": ""})
+    item.setdefault("first_seen_at", utc_now())
+    item.setdefault("last_seen_at", item["first_seen_at"])
+    item.setdefault("last_kindle_sync_id", "")
+    return item
+
+
+def _copy_catalog(catalog: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(catalog, ensure_ascii=False))
+
+
+# Compatibility alias used by the bridge while callers migrate to catalog v2.
+_build_books = books_from_lexemes

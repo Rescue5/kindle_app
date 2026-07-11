@@ -62,23 +62,36 @@ def append_cards(
     backup_enabled: bool = True,
 ) -> dict[str, Any]:
     """Append processed entries to Obsidian SR priority files."""
-    backup_path = backup_cards(cards_dir, backups_dir) if backup_enabled else None
-
     by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    existing_lemmas = {
+        _normalize_base(str((item.get("analysis") or {}).get("base_form") or item.get("stem") or item.get("word") or ""))
+        for item in read_cards(cards_dir)
+    }
+    item_results: list[dict[str, str]] = []
     skipped = 0
 
     for entry in entries:
+        item_id = str(entry.get("id") or "")
         status = entry.get("processing_status")
         analysis = entry.get("analysis") or {}
+        lemma = _normalize_base(str(analysis.get("base_form") or entry.get("stem") or entry.get("word") or ""))
+        if lemma and lemma in existing_lemmas:
+            skipped += 1
+            item_results.append({"id": item_id, "outcome": "already_present", "reason": ""})
+            continue
         if status != "processed" or analysis.get("accepted") is False:
             skipped += 1
+            reason = "waiting_processing" if status != "processed" else "rejected"
+            item_results.append({"id": item_id, "outcome": "blocked", "reason": reason})
             continue
         score = analysis.get("importance_score")
         if score not in _FILE_BY_PRIORITY:
             skipped += 1
+            item_results.append({"id": item_id, "outcome": "blocked", "reason": "unsupported_priority"})
             continue
         by_file[_FILE_BY_PRIORITY[score]].append(entry)
 
+    backup_path = backup_cards(cards_dir, backups_dir) if backup_enabled and by_file else None
     added = 0
     files_touched: set[str] = set()
 
@@ -94,10 +107,15 @@ def append_cards(
             key = f"{word}|{context}".casefold()
             if key in existing_keys:
                 skipped += 1
+                item_results.append({"id": str(entry.get("id") or ""), "outcome": "already_present", "reason": ""})
                 continue
             existing_keys.add(key)
+            lemma = _normalize_base(str((entry.get("analysis") or {}).get("base_form") or entry.get("stem") or word))
+            if lemma:
+                existing_lemmas.add(lemma)
             new_cards.append(_render_card(entry))
             added += 1
+            item_results.append({"id": str(entry.get("id") or ""), "outcome": "added", "reason": ""})
 
         if not new_cards:
             continue
@@ -116,8 +134,15 @@ def append_cards(
         "skipped": skipped,
         "files": sorted(files_touched),
         "backup_path": str(backup_path) if backup_path else "",
+        "items": item_results,
     }
-    logger.info("Appended obsidian cards result=%s", result)
+    logger.info(
+        "Appended obsidian cards added=%d skipped=%d files=%d item_results=%d",
+        added,
+        skipped,
+        len(files_touched),
+        len(item_results),
+    )
     return result
 
 
@@ -282,13 +307,13 @@ def _extract_base_form(answer: str, word: str) -> str:
     if not match:
         return word
     content = match.group(1).strip()
-    if "<!-- NN_PENDING -->" in content:
-        return word
     for separator in ("\u2014", "\u2013", "-"):
         if separator in content:
             candidate = content.split(separator, 1)[0].strip()
             if candidate and re.fullmatch(r"[A-Za-z][A-Za-z\s\-'\.]*", candidate):
                 return candidate
+    if "<!-- NN_PENDING -->" in content:
+        return word
     if re.fullmatch(r"[A-Za-z][A-Za-z\s\-'\.]*", content):
         return content
     return word
@@ -423,6 +448,7 @@ def _render_card(entry: dict[str, Any]) -> str:
     book_title = str(entry.get("book_title") or "").strip()
     authors = str(entry.get("authors") or "").strip()
     analysis = entry.get("analysis") or {}
+    base_form = str(analysis.get("base_form") or entry.get("stem") or word).strip() or word
 
     translation_status = analysis.get("translation_status") or "offline_only"
     russian_meanings = str(analysis.get("russian_meanings") or "").strip()
@@ -439,7 +465,7 @@ def _render_card(entry: dict[str, Any]) -> str:
     indented_context = _indent_block(context)
 
     if is_enriched:
-        answer_heading = russian_meanings.splitlines()[0].strip()
+        answer_heading = f"{base_form} — {'; '.join(line.strip() for line in russian_meanings.splitlines() if line.strip())}"
         examples = _indent_block(
             _format_examples(
                 russian_meanings, generated_context_en, generated_context_ru
@@ -463,7 +489,7 @@ def _render_card(entry: dict[str, Any]) -> str:
 > [!example]- Контекст
 > {indented_context}
 ?
-**<!-- NN_PENDING -->**
+**{base_form} — <!-- NN_PENDING -->**
 > [!quote]- Перевод контекста
 >
 >

@@ -9,7 +9,7 @@ import string
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from wordfreq import zipf_frequency
 
@@ -197,6 +197,7 @@ def optimize_entries(
     snapshot_path: Path,
     *,
     config_path: Path | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> OptimizationResult:
     logger.info(
         "Starting vocabulary optimization entries=%d output_dir=%s snapshot_path=%s config_path=%s",
@@ -232,10 +233,13 @@ def optimize_entries(
             },
         )
 
-    for lexical_key, group in sorted(grouped.items()):
+    total_groups = len(grouped)
+    for group_index, (lexical_key, group) in enumerate(sorted(grouped.items()), 1):
         if snapshot.has_processed(lexical_key):
             skipped_existing += 1
             logger.debug("Skipping already processed lexical_key=%s occurrences=%d", lexical_key, len(group))
+            if progress_callback:
+                progress_callback(group_index, total_groups, lexical_key)
             continue
 
         analysis = _analyze_group(lexical_key, group, config)
@@ -268,6 +272,8 @@ def optimize_entries(
             },
         )
         _write_analysis_json(analysis_dir, lexical_key, analysis)
+        if progress_callback:
+            progress_callback(group_index, total_groups, lexical_key)
 
     accepted = [analysis for analysis in analyses if analysis["accepted"]]
     if analyses or not tsv_path.exists():

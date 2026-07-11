@@ -50,3 +50,95 @@ connector/process UI states factual.
 - Introduce catalog schema v2 and migration.
 - Replace bridge and frontend contracts.
 - Add real progress/cancellation, UI integration, tests, and visual QA.
+
+## 2026-07-11 - Codex - Lifecycle and synchronization redesign implemented
+
+### Backend And Runtime
+
+- Replaced cache v1 entries with catalog v2 lexemes, occurrences, freshness,
+  processing, source membership, and independent destination states.
+- Added atomic v1 migration with a one-time `.v1.bak` backup and source
+  reconciliation from cached Kindle data and configured Obsidian cards.
+- Changed Kindle synchronization to preserve known processing while adding new
+  forms and contexts. A successful sync advances the novelty batch.
+- Changed Obsidian import to merge into the catalog with Obsidian analysis as the
+  authority instead of replacing frontend state.
+- Added per-lexeme Obsidian outcomes: `added`, `already_present`, `blocked`, and
+  `failed`. Existing cards are never overwritten.
+- Added optimizer progress callbacks and structured progress events on stderr;
+  stdout remains clean bridge JSON.
+- Changed the Tauri bridge to stream progress events and terminate the child
+  Python process when `cancel_python_bridge(job_id)` is called.
+- Improved Obsidian card rendering so the English base form survives round-trip
+  parsing for enriched and `NN_PENDING` cards.
+
+### Frontend
+
+- Replaced the old entry contract with `LexemeRecord` and independent connector,
+  processing, freshness, source, and destination types.
+- Split the former monolithic `src/main.tsx` into a controller hook, pure domain
+  selectors, and focused workspace components.
+- Removed the bottom-left source card and timer-driven pipeline.
+- Added factual Kindle/Obsidian connector controls, five-second focused-window
+  probing, combined row states, grouped contexts, global Obsidian sync, and a
+  compact operation rail with cancel, retry, and dismiss states.
+- Added a real Obsidian enable switch to Settings.
+- Added deterministic browser preview scenarios for mixed, disconnected, slow,
+  and one-time operation-error states.
+
+### Local Data Migration
+
+- Migrated the ignored local catalog successfully: 1,022 legacy rows became 997
+  lexemes without deleting occurrences.
+- Reconciliation produced 809 `ready + synced` lexemes and 188
+  `pending + not_synced` lexemes.
+- Runtime data and its backup remain ignored and are not part of commits.
+
+### Tests And Visual QA
+
+- `python -m compileall kindle_vocab_app`: passed.
+- `python -m unittest discover -s tests -v`: 8 tests passed.
+- `npm test`: 3 Vitest tests passed.
+- `npm run build`: passed; 1,996 modules transformed.
+- `cargo check`: passed.
+- `git diff --check`: passed; only expected Windows line-ending warnings.
+- Browser QA at 1280x720 passed with no console errors and no body overflow.
+- Verified filtering, manual processing, global Obsidian sync, disconnected
+  Kindle, operation error plus successful retry, cancellation restoring pending
+  state, settings navigation, and the Obsidian enable switch.
+- Visual polish removed a horizontal table scrollbar, prevented metadata wrapping,
+  and improved the narrow inspector's Obsidian status layout.
+
+### Failures Encountered
+
+- `pytest` was unavailable, so backend tests use standard `unittest`.
+- Two simultaneous `conda run` commands conflicted over a conda temporary file;
+  all conda checks are now run sequentially.
+- Vitest dependency installation and execution initially lacked sandbox access;
+  both succeeded with the approved external npm cache access.
+- PowerShell `Start-Process` inherited duplicate `Path`/`PATH` keys; the local
+  Vite server was started through an approved detached Windows process instead.
+
+### Remaining Risk
+
+- Browser preview validates frontend workflows; the Tauri-specific child-process
+  cancellation path is covered by Rust compilation and code review, not an
+  automated end-to-end WebView test.
+
+## 2026-07-11 - Codex - Redesign finalized
+
+### Commits
+
+- `37d64dd` - work-log protocol and mandatory agent rules.
+- `4031d24` - catalog v2, backend lifecycle, progress/cancel bridge, and tests.
+- `fc4603b` - React domain/controller/component refactor and Vitest coverage.
+
+### Final Verification
+
+- Re-ran the production frontend build after the final controller and retry
+  changes: passed.
+- Final Browser screenshots cover a mixed Kindle/Obsidian library with an
+  inspected processed lemma and a disconnected Kindle with cached data retained.
+- Final Browser console error/warning collection was empty.
+- `.kimi-code/`, `.vscode/`, generated screenshots, runtime cache, migration
+  backup, logs, and user dictionary data were intentionally left untracked.

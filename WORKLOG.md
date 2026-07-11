@@ -139,6 +139,115 @@ connector/process UI states factual.
   changes: passed.
 - Final Browser screenshots cover a mixed Kindle/Obsidian library with an
   inspected processed lemma and a disconnected Kindle with cached data retained.
-- Final Browser console error/warning collection was empty.
+- Final console error/warning collection was empty.
 - `.kimi-code/`, `.vscode/`, generated screenshots, runtime cache, migration
   backup, logs, and user dictionary data were intentionally left untracked.
+
+## 2026-07-11 - Kimi - Fix Kindle connector flicker and bridge `sync_id` crash
+
+### Goal
+
+Fix two regressions reported after the Codex redesign:
+
+1. The Kindle connector button lost its glow and the disconnected notice flashed
+   during every background probe, even when the Kindle was still connected.
+2. Offline processing failed with `UnboundLocalError: cannot access local variable 'sync_id'`.
+
+### Changes
+
+- `kindle_vocab_app/tauri_bridge.py`: removed duplicated `process_lexemes`,
+  `export`, and `load_demo` branches left over from the redesign merge. The
+  remaining `process_lexemes`/`optimize` handler is the correct one and no
+  longer references the undefined `sync_id` or `source.label` variables.
+- `src/features/library/use-library-controller.ts`: stopped setting the Kindle
+  connector state to `checking` during `probeConnectors`; the previous connected
+  state is now preserved until the probe returns a new factual state.
+- `src/features/library/library-workspace.tsx`:
+  - `ConnectorNotice` now renders only when the Kindle state is `disconnected`,
+    so it no longer appears during checks or errors.
+  - `ConnectorButton` no longer uses the `checking` state for a spinner, since
+    probing no longer transitions to that state.
+
+### Verification
+
+- `python -m compileall kindle_vocab_app`: passed.
+- `python -m unittest discover -s tests -v`: 8 tests passed.
+- `npm test`: 3 Vitest tests passed.
+- `npm run build`: passed; 1,996 modules transformed.
+- `cargo check`: passed.
+- `git diff --check`: passed.
+
+### Remaining Risk
+
+- Visual QA was limited to a successful production build and TypeScript checks;
+  a live browser/Tauri screenshot was not captured because no browser automation
+  tooling was installed in the current environment.
+
+## 2026-07-11 - Kimi - Fix `process_lexemes` tuple handling and add bridge smoke test
+
+### Goal
+
+Fix the follow-up regression `'tuple' object has no attribute 'get'` during offline
+processing and add a focused smoke test for the bridge `process_lexemes` path.
+
+### Changes
+
+- `kindle_vocab_app/tauri_bridge.py`: in the `process_lexemes`/`optimize`
+  handler, unpacked the tuple returned by `_analysis_by_lemma` into
+  `(analyses, analyses_by_id)` and restored the lookup by representative entry id.
+- `tests/test_tauri_bridge_smoke.py`: added a new test module covering:
+  - `_analysis_by_lemma` returning a `(by_lemma, by_id)` tuple;
+  - `dispatch("process_lexemes", ...)` running end-to-end without crashing on
+    the tuple return value.
+- `.kimi-code/AGENTS.md`: added a "Mandatory verification after every code change"
+  section requiring runtime checks, not just static checks, before reporting
+  completion.
+
+### Verification
+
+- `conda run -n kindle_app python -m compileall kindle_vocab_app`: passed.
+- `conda run -n kindle_app python -m unittest discover -s tests -v`: 10 tests
+  passed (including 2 new bridge smoke tests).
+- `npm test`: 3 Vitest tests passed.
+- `npm run build`: passed.
+- `cargo check`: passed.
+- `git diff --check`: passed.
+
+### Remaining Risk
+
+- The new smoke test exercises the happy path; it does not cover all failure
+  modes of the optimizer or cancellation edge cases.
+
+## 2026-07-11 - Codex - Recover skipped offline analyses and verify Obsidian state
+
+### Goal
+
+Resolve the remaining bridge error `Не найден audit-файл offline-обработки` and
+verify that catalog synchronization marks agree with the configured Obsidian
+cards without writing to the vault.
+
+### Changes
+
+- Corrected `process_lexemes` to look up optimizer results by the optimizer's
+  normalized candidate key, not only by the display form stored in the catalog.
+  This recovers previously processed forms such as an inflected word whose
+  audit/snapshot belongs to its base form.
+- Treated entries for which the English offline optimizer cannot form a
+  candidate as an explicit `rejected` result with the
+  `unsupported_language` reason. They no longer report a missing audit file.
+- Normalized Obsidian queue reasons from the independent processing state:
+  `ready` entries are ready to sync, while rejected and failed entries retain a
+  factual blocking reason.
+- Added bridge regression coverage for both normalized snapshot recovery and
+  unsupported-language rejection.
+
+### Verification
+
+- Re-ran the actual pending-failure batch after the fix: no lexemes remain in
+  the `failed` processing state; the unsupported entry is correctly rejected.
+- Read-only reconciliation check found 809 catalog entries marked as synced and
+  809 matching normalized lemmas in the configured Obsidian cards; there were
+  zero catalog entries falsely marked as synced.
+- The remaining Obsidian queue consists of ready entries awaiting sync and
+  rejected entries with explicit blocking reasons. No vault files were written
+  during this verification.

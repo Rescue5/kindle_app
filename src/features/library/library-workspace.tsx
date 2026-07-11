@@ -121,7 +121,7 @@ function ConnectorButton({ kind, info, onClick, disabled }: { kind: "kindle" | "
 }
 
 function ConnectorNotice({ connector }: { connector: ConnectorInfo }) {
-  if (!["disconnected", "error"].includes(connector.state)) return null;
+  if (connector.state === "connected") return null;
   return (
     <div className="flex items-center gap-2 border-b border-line bg-panel-raised/35 px-5 py-2 text-xs text-muted-foreground">
       <CloudOff size={14} className="text-warning" />

@@ -16,7 +16,7 @@ from kindle_vocab_app.kindle_device import find_kindle_source
 from kindle_vocab_app.logging_config import configure_logging, get_logger
 from kindle_vocab_app.processing_state import ProcessedSnapshot
 from kindle_vocab_app.tsv_schema import OPTIMIZED_TSV_HEADER
-from kindle_vocab_app.vocab_optimizer import optimize_entries
+from kindle_vocab_app.vocab_optimizer import optimize_entries, _candidate_from_entry
 
 
 logger = get_logger(__name__)
@@ -69,6 +69,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         sync_id = uuid.uuid4().hex
         _emit_progress(job_id, "merging", "Объединяем формы и известные леммы", 3, 4)
         catalog = vocab_cache.merge_kindle(catalog, entries, sync_id=sync_id, mark_new=True)
+        _refresh_obsidian_destination_states(catalog)
         vocab_cache.save(workspace, catalog)
         _emit_progress(job_id, "completed", "Синхронизация Kindle завершена", 4, 4)
         logger.info(
@@ -118,6 +119,14 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
             if item.get("id") in requested_ids and (item.get("processing") or {}).get("state") in {"pending", "failed"}
         ]
         entries = [_lexeme_as_entry(item) for item in selected]
+        candidate_keys_by_id: dict[str, str] = {}
+        for entry in entries:
+            candidate = _candidate_from_entry(entry)
+            if candidate is None:
+                continue
+            candidate_keys_by_id[str(entry.get("id") or "")] = vocab_cache.normalize_lemma(
+                str(candidate["lexical_key"])
+            )
         _emit_progress(job_id, "preparing", f"Подготовлено лемм: {len(entries)}", 0, max(len(entries), 1))
         output_dir = workspace / ".app-data" / "optimized"
         result = optimize_entries(
@@ -132,13 +141,34 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
                 max(total, 1),
             ),
         )
-        analyses = _analysis_by_lemma(result.analysis_dir)
+        analyses, analyses_by_id = _analysis_by_lemma(result.analysis_dir)
         snapshot = ProcessedSnapshot.load(result.snapshot_path)
+        rejected_without_candidate = 0
         for index, lexeme in enumerate(selected, 1):
             lemma_key = vocab_cache.normalize_lemma(str(lexeme.get("lemma") or ""))
             forms = {vocab_cache.normalize_lemma(str(form)) for form in lexeme.get("forms") or []}
             display_key = vocab_cache.normalize_lemma(str(lexeme.get("display_form") or ""))
-            analysis = analyses.get(lemma_key)
+            lexeme_id = str(lexeme.get("id") or "")
+            candidate_key = candidate_keys_by_id.get(lexeme_id, "")
+            if not candidate_key:
+                rejected_without_candidate += 1
+                lexeme["processing"] = {
+                    "state": "rejected",
+                    "analysis": _analysis_for_unsupported_entry(lexeme),
+                    "updated_at": vocab_cache.utc_now(),
+                    "error": "",
+                }
+                lexeme["destinations"]["obsidian"].update(
+                    {"state": "not_synced", "reason": "unsupported_language"}
+                )
+                logger.info(
+                    "Rejected unsupported offline-processing entry job_id=%s lexeme_id=%s language=%s",
+                    job_id,
+                    lexeme_id,
+                    lexeme.get("language"),
+                )
+                continue
+            analysis = analyses.get(candidate_key) or analyses.get(lemma_key) or analyses_by_id.get(lexeme_id)
             if analysis is None:
                 previous = (lexeme.get("processing") or {}).get("analysis")
                 if previous:
@@ -149,7 +179,9 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
                         analysis = candidate
                         break
             if analysis is None:
-                for key in {lemma_key, display_key, *forms}:
+                for key in {candidate_key, lemma_key, display_key, *forms}:
+                    if not key:
+                        continue
                     if snapshot.has_processed(key):
                         analysis = _analysis_from_snapshot(snapshot.processed[key])
                         break
@@ -169,6 +201,10 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
                     "error": "",
                 }
                 lexeme["lemma"] = vocab_cache.normalize_lemma(str(analysis.get("base_form") or lexeme["lemma"]))
+                if not accepted:
+                    lexeme["destinations"]["obsidian"].update(
+                        {"state": "not_synced", "reason": "rejected"}
+                    )
             logger.debug(
                 "Applied processing result job_id=%s lexeme_id=%s index=%d total=%d state=%s",
                 job_id,
@@ -177,13 +213,14 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
                 len(selected),
                 lexeme["processing"]["state"],
             )
+        _refresh_obsidian_destination_states(catalog)
         vocab_cache.save(workspace, catalog)
         _emit_progress(job_id, "completed", "Offline-обработка завершена", len(selected), max(len(selected), 1))
         return {
             "processed_new": result.processed_new,
             "accepted_new": result.accepted_new,
             "skipped_existing": result.skipped_existing,
-            "rejected_new": result.rejected_new,
+            "rejected_new": result.rejected_new + rejected_without_candidate,
             "tsv_path": str(result.tsv_path),
             "entries": catalog["lexemes"],
             "events": [
@@ -303,6 +340,7 @@ def _load_catalog_with_sources(workspace: Path, *, reconcile_kindle: bool = True
             catalog = vocab_cache.merge_obsidian(catalog, obsidian_sync.read_cards(cards_dir))
         except Exception:
             logger.exception("Failed to reconcile Obsidian cards")
+    _refresh_obsidian_destination_states(catalog)
     vocab_cache.save(workspace, catalog)
     return catalog
 
@@ -365,10 +403,52 @@ def _lexeme_as_entry(lexeme: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _analysis_by_lemma(analysis_dir: Path) -> dict[str, dict[str, Any]]:
-    result: dict[str, dict[str, Any]] = {}
+def _refresh_obsidian_destination_states(catalog: dict[str, Any]) -> None:
+    """Keep the Obsidian queue reason aligned with the independent processing state."""
+    for lexeme in catalog.get("lexemes") or []:
+        destination = (lexeme.get("destinations") or {}).get("obsidian")
+        if not isinstance(destination, dict) or destination.get("state") == "synced":
+            continue
+        processing_state = str((lexeme.get("processing") or {}).get("state") or "pending")
+        if processing_state == "ready":
+            destination.update({"state": "not_synced", "reason": ""})
+        elif processing_state == "rejected":
+            reason = str(destination.get("reason") or "")
+            warnings = (lexeme.get("processing") or {}).get("analysis") or {}
+            unsupported = "unsupported_language" in (warnings.get("warnings") or [])
+            destination.update(
+                {
+                    "state": "not_synced",
+                    "reason": "unsupported_language" if unsupported or reason == "unsupported_language" else "rejected",
+                }
+            )
+        elif processing_state == "failed":
+            destination.update({"state": "not_synced", "reason": "processing_failed"})
+        else:
+            destination.update({"state": "not_synced", "reason": "waiting_processing"})
+
+
+def _analysis_for_unsupported_entry(lexeme: dict[str, Any]) -> dict[str, Any]:
+    """Build an honest terminal result when the offline English optimizer cannot parse an entry."""
+    occurrences = list(lexeme.get("occurrences") or [])
+    return {
+        "base_form": str(lexeme.get("lemma") or lexeme.get("display_form") or ""),
+        "accepted": False,
+        "importance_score": 0,
+        "importance_note": "Offline-обработчик поддерживает только английские слова.",
+        "frequency_note": "",
+        "warnings": ["unsupported_language"],
+        "source_occurrence_count": len(occurrences),
+        "translation_status": "offline_only",
+    }
+
+
+def _analysis_by_lemma(analysis_dir: Path) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Return (analysis by normalized lexical_key, analysis by representative entry id)."""
+    by_lemma: dict[str, dict[str, Any]] = {}
+    by_id: dict[str, dict[str, Any]] = {}
     if not analysis_dir.exists():
-        return result
+        return by_lemma, by_id
     for path in analysis_dir.glob("*.json"):
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -398,8 +478,12 @@ def _analysis_by_lemma(analysis_dir: Path) -> dict[str, dict[str, Any]]:
         }
         key = vocab_cache.normalize_lemma(str(raw.get("lexical_key") or analysis["base_form"]))
         if key:
-            result[key] = analysis
-    return result
+            by_lemma[key] = analysis
+        entry = dict(raw.get("representative_entry") or {})
+        entry_id = str(entry.get("id") or "")
+        if entry_id:
+            by_id[entry_id] = analysis
+    return by_lemma, by_id
 
 
 def _analysis_from_snapshot(payload: dict[str, Any]) -> dict[str, Any]:

@@ -3,22 +3,23 @@ export type BookOption = {
   key: string;
 };
 
-export type VocabEntry = {
+export type OccurrenceSource = "kindle" | "obsidian" | "legacy";
+
+export type LexemeOccurrence = {
   id: string;
+  source: OccurrenceSource;
   word: string;
-  stem: string;
   context: string;
   book_key: string;
   book_title: string;
   authors: string;
-  language: string;
   looked_up_at: string;
-  processing_status?: ProcessingStatus;
-  analysis?: WordAnalysis;
-  export_status?: "none" | "queued" | "exported" | "failed";
 };
 
-export type ProcessingStatus = "raw" | "processing" | "processed" | "rejected" | "skipped" | "failed";
+export type Freshness = "new" | "known";
+export type ProcessingState = "pending" | "processing" | "ready" | "rejected" | "failed";
+export type SyncState = "not_synced" | "syncing" | "synced" | "failed";
+export type ExportState = "not_exported" | "exporting" | "exported" | "failed";
 
 export type WordAnalysis = {
   base_form: string;
@@ -43,6 +44,77 @@ export type WordAnalysis = {
   generated_context_ru?: string;
 };
 
+export type LexemeRecord = {
+  id: string;
+  lemma: string;
+  display_form: string;
+  language: string;
+  forms: string[];
+  occurrences: LexemeOccurrence[];
+  freshness: Freshness;
+  processing: {
+    state: ProcessingState;
+    analysis?: WordAnalysis | null;
+    updated_at: string;
+    error: string;
+  };
+  sources: {
+    kindle: boolean;
+    obsidian: boolean;
+    legacy: boolean;
+  };
+  destinations: {
+    obsidian: {
+      state: SyncState;
+      reason: string;
+      last_synced_at: string;
+    };
+    anki: {
+      state: ExportState;
+      last_exported_at: string;
+    };
+    quizlet: {
+      state: ExportState;
+      last_exported_at: string;
+    };
+  };
+  first_seen_at: string;
+  last_seen_at: string;
+  last_kindle_sync_id: string;
+};
+
+export type ConnectorState = "unknown" | "checking" | "connected" | "disconnected" | "disabled" | "error";
+
+export type ConnectorInfo = {
+  state: ConnectorState;
+  label: string;
+  checked_at: string;
+};
+
+export type ConnectorStatus = {
+  kindle: ConnectorInfo;
+  obsidian: ConnectorInfo;
+};
+
+export type LibraryResult = {
+  sourceName: string;
+  sourceStatus: string;
+  books: BookOption[];
+  entries: LexemeRecord[];
+  last_kindle_sync_id: string;
+  connectors: ConnectorStatus;
+};
+
+export type ProgressEvent = {
+  job_id: string;
+  stage: string;
+  message: string;
+  current: number;
+  total: number;
+  lexeme_id: string;
+  timestamp: string;
+};
+
 export type ActivityEvent = {
   phase: "ready" | "thinking" | "answered" | "failed" | string;
   title: string;
@@ -64,17 +136,17 @@ export type AppSettings = {
   obsidian_backup_enabled: boolean;
 };
 
-export type AppState = {
-  sourceName: string;
-  sourceStatus: string;
-  statusMessage: string;
-  dbLoaded: boolean;
-  processing: boolean;
-  books: BookOption[];
-  selectedBookIndex: number;
-  searchText: string;
-  entries: VocabEntry[];
-  activityEvents: ActivityEvent[];
-  settings: AppSettings;
-  currentView: "library" | "settings";
+export type OperationKind = "idle" | "kindle" | "processing" | "obsidian" | "export";
+export type OperationStatus = "idle" | "running" | "completed" | "cancelled" | "error";
+
+export type Operation = {
+  id: string;
+  kind: OperationKind;
+  status: OperationStatus;
+  title: string;
+  message: string;
+  current: number;
+  total: number;
+  stage: string;
+  error: string;
 };

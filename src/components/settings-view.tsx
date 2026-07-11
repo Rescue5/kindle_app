@@ -186,18 +186,25 @@ export function SettingsView({ settings, onChange }: SettingsViewProps) {
 
         <SettingsSection icon={ScrollText} title="Obsidian">
           <div
-            className={`flex items-center gap-2.5 rounded-[10px] border px-4 py-2.5 text-sm ${
+            className={`flex items-center justify-between gap-4 rounded-[10px] border px-4 py-3 text-sm ${
               settings.obsidian_sync_enabled
                 ? "border-purple-500/25 bg-purple-500/8 text-purple-200"
                 : "border-line bg-panel-raised/40 text-muted-foreground"
             }`}
           >
-            <span
-              className={`h-2 w-2 rounded-full ${
-                settings.obsidian_sync_enabled ? "bg-purple-400" : "bg-muted-foreground"
-              }`}
+            <div className="flex items-center gap-2.5">
+              <span className={`h-2 w-2 rounded-full ${settings.obsidian_sync_enabled ? "bg-purple-400" : "bg-muted-foreground"}`} />
+              <div>
+                <label htmlFor="obsidian-enabled-switch" className="font-medium">Синхронизация с Obsidian</label>
+                <p className="mt-0.5 text-xs opacity-75">Импортировать готовые карточки и отправлять глобальную очередь.</p>
+              </div>
+            </div>
+            <Switch
+              id="obsidian-enabled-switch"
+              checked={settings.obsidian_sync_enabled}
+              onCheckedChange={(value) => update("obsidian_sync_enabled", value)}
+              aria-label="Включить синхронизацию с Obsidian"
             />
-            Синхронизация с Obsidian: {settings.obsidian_sync_enabled ? "включена" : "выключена"}
           </div>
           <div className="grid gap-5 sm:grid-cols-2">
             <Field label="Путь к хранилищу Obsidian" hint="Абсолютный путь до папки vault">

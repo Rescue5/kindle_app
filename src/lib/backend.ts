@@ -1,156 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActivityEvent, AppSettings, AppState, BookOption, VocabEntry } from "@/types";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  AppSettings,
+  BookOption,
+  ConnectorStatus,
+  LexemeOccurrence,
+  LexemeRecord,
+  LibraryResult,
+  ProgressEvent,
+  WordAnalysis,
+} from "@/types";
 
-function rawEntry(entry: Omit<VocabEntry, "id" | "processing_status" | "export_status">): VocabEntry {
-  const id = [entry.word, entry.book_key, entry.looked_up_at, entry.context].join("|");
-  return {
-    ...entry,
-    id,
-    processing_status: "raw",
-    export_status: "none",
-  };
-}
-
-const baseDemoEntries: VocabEntry[] = [
-  rawEntry({
-    word: "afraid",
-    stem: "afraid",
-    context: "She was afraid to open the old door.",
-    book_key: "demo-night",
-    book_title: "The Night Reader",
-    authors: "Demo Library",
-    language: "en",
-    looked_up_at: "2026-06-19",
-  }),
-  rawEntry({
-    word: "glimpse",
-    stem: "glimpse",
-    context: "For a moment he caught a glimpse of the city below.",
-    book_key: "demo-night",
-    book_title: "The Night Reader",
-    authors: "Demo Library",
-    language: "en",
-    looked_up_at: "2026-06-18",
-  }),
-  rawEntry({
-    word: "dread",
-    stem: "dread",
-    context: "A quiet dread settled over the room.",
-    book_key: "demo-shadow",
-    book_title: "Shadows and Signals",
-    authors: "Demo Library",
-    language: "en",
-    looked_up_at: "2026-06-17",
-  }),
-  rawEntry({
-    word: "submerge",
-    stem: "submerge",
-    context: "He tried to submerge the memory before it surfaced again.",
-    book_key: "demo-night",
-    book_title: "The Night Reader",
-    authors: "Demo Library",
-    language: "en",
-    looked_up_at: "2026-06-17",
-  }),
-  rawEntry({
-    word: "resilient",
-    stem: "resilient",
-    context: "Her resilient spirit never broke.",
-    book_key: "demo-shadow",
-    book_title: "Shadows and Signals",
-    authors: "Demo Library",
-    language: "en",
-    looked_up_at: "2026-06-16",
-  }),
-  rawEntry({
-    word: "vigilant",
-    stem: "vigilant",
-    context: "They remained vigilant through the night.",
-    book_key: "demo-shadow",
-    book_title: "Shadows and Signals",
-    authors: "Demo Library",
-    language: "en",
-    looked_up_at: "2026-06-15",
-  }),
-  rawEntry({
-    word: "faint",
-    stem: "faint",
-    context: "A faint glow lit the corridor.",
-    book_key: "demo-night",
-    book_title: "The Night Reader",
-    authors: "Demo Library",
-    language: "en",
-    looked_up_at: "2026-06-15",
-  }),
-  rawEntry({
-    word: "meticulous",
-    stem: "meticulous",
-    context: "He kept meticulous notes in the margin.",
-    book_key: "demo-shadow",
-    book_title: "Shadows and Signals",
-    authors: "Demo Library",
-    language: "en",
-    looked_up_at: "2026-06-14",
-  }),
-];
-
-const demoEntries = buildDemoEntries(getPreviewEntryCount());
-const demoBooks = buildDemoBooks(demoEntries);
-
-function getPreviewEntryCount() {
-  if (typeof window === "undefined") return baseDemoEntries.length;
-  const params = new URLSearchParams(window.location.search);
-  const requested = params.get("demoRows") ?? (params.has("stress") ? "1200" : "");
-  const parsed = Number(requested);
-  if (!Number.isFinite(parsed) || parsed <= baseDemoEntries.length) return baseDemoEntries.length;
-  return Math.min(2500, Math.round(parsed));
-}
-
-function buildDemoEntries(count: number) {
-  const entries = [...baseDemoEntries];
-  for (let index = entries.length; index < count; index += 1) {
-    const seed = baseDemoEntries[index % baseDemoEntries.length];
-    if (index % 83 === 0) {
-      entries.push({ ...seed });
-      continue;
-    }
-    const sequence = index + 1;
-    entries.push(
-      rawEntry({
-        word: seed.word,
-        stem: seed.stem,
-        context: `${seed.context} Preview occurrence ${sequence}.`,
-        book_key: seed.book_key,
-        book_title: seed.book_title,
-        authors: seed.authors,
-        language: seed.language,
-        looked_up_at: `2026-06-${String((index % 28) + 1).padStart(2, "0")}`,
-      }),
-    );
-  }
-  return entries;
-}
-
-function buildDemoBooks(entries: VocabEntry[]): BookOption[] {
-  const counts = entries.reduce(
-    (acc, entry) => acc.set(entry.book_key, (acc.get(entry.book_key) ?? 0) + 1),
-    new Map<string, number>(),
-  );
-  return [
-    { label: "Все книги", key: "" },
-    { label: `The Night Reader · Demo Library · ${counts.get("demo-night") ?? 0}`, key: "demo-night" },
-    { label: `Shadows and Signals · Demo Library · ${counts.get("demo-shadow") ?? 0}`, key: "demo-shadow" },
-  ];
-}
-
-const demoEvents: ActivityEvent[] = [
-  {
-    phase: "ready",
-    title: "Ожидание Kindle",
-    message: "Подключите Kindle или используйте preview-данные. Слова остаются необработанными до offline-обработки.",
-    meta: "Готово",
-  },
-];
+const isTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export const defaultSettings: AppSettings = {
   theme: "system",
@@ -166,98 +27,166 @@ export const defaultSettings: AppSettings = {
   obsidian_backup_enabled: true,
 };
 
-export const initialState: AppState = {
-  sourceName: "Preview workspace",
-  sourceStatus: "Kindle не подключён · показаны демонстрационные слова",
-  statusMessage: "Слова из Kindle Vocabulary Builder и подготовка карточек",
-  dbLoaded: true,
-  processing: false,
-  books: demoBooks,
-  selectedBookIndex: 0,
-  searchText: "",
-  entries: demoEntries,
-  activityEvents: demoEvents,
-  settings: defaultSettings,
-  currentView: "library",
-};
-
 export async function callBackend<T>(action: string, payload: unknown): Promise<T> {
-  if (!("__TAURI_INTERNALS__" in window)) {
-    return mockBackend<T>(action, payload);
-  }
+  if (!isTauri()) return mockBackend<T>(action, payload);
   return invoke<T>("python_bridge", { action, payload });
 }
 
+export async function cancelBackend(jobId: string): Promise<boolean> {
+  if (!isTauri()) {
+    cancelledJobs.add(jobId);
+    return true;
+  }
+  return invoke<boolean>("cancel_python_bridge", { jobId });
+}
+
+export async function listenProgress(handler: (event: ProgressEvent) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<ProgressEvent>("backend-progress", (event) => handler(event.payload));
+}
+
+const previewScenario = () => new URLSearchParams(window.location.search).get("scenario") ?? "mixed";
+
+const baseWords = [
+  ["admitting", "admit", "She knew the answer but shied from admitting it.", "The Mirror's Truth", "Michael R. Fletcher"],
+  ["glimpse", "glimpse", "For a moment he caught a glimpse of the city below.", "The Night Reader", "Demo Library"],
+  ["dread", "dread", "A quiet dread settled over the room.", "Shadows and Signals", "Demo Library"],
+  ["submerged", "submerge", "He tried to submerge the memory before it surfaced again.", "The Night Reader", "Demo Library"],
+  ["resilient", "resilient", "Her resilient spirit never broke.", "Shadows and Signals", "Demo Library"],
+  ["vigilant", "vigilant", "They remained vigilant through the night.", "Shadows and Signals", "Demo Library"],
+] as const;
+
+function occurrence(index: number, source: LexemeOccurrence["source"] = "kindle"): LexemeOccurrence {
+  const [word, , context, book, authors] = baseWords[index];
+  return {
+    id: `${source}-${index}`,
+    source,
+    word,
+    context,
+    book_key: book,
+    book_title: book,
+    authors,
+    looked_up_at: source === "kindle" ? `2026-07-${String(10 - index).padStart(2, "0")}` : "",
+  };
+}
+
+function analysis(lemma: string, score: number): WordAnalysis {
+  return {
+    base_form: lemma,
+    pos: "offline",
+    accepted: true,
+    importance_score: score,
+    importance_note: "Оценено локальными частотными и морфологическими правилами.",
+    frequency_note: "Zipf 3.8",
+    source_occurrence_count: 1,
+    translation_status: "offline_only",
+    warnings: [],
+  };
+}
+
+function makeLexeme(index: number): LexemeRecord {
+  const [word, lemma] = baseWords[index];
+  const ready = index === 0 || index >= 4;
+  const inObsidian = index === 0 || index === 4;
+  return {
+    id: `lexeme-${lemma}`,
+    lemma,
+    display_form: word,
+    language: "en",
+    forms: word === lemma ? [word] : [word, lemma],
+    occurrences: [occurrence(index), ...(inObsidian ? [occurrence(index, "obsidian")] : [])],
+    freshness: index === 1 || index === 2 ? "new" : "known",
+    processing: {
+      state: ready ? "ready" : "pending",
+      analysis: ready ? analysis(lemma, index === 0 ? 10 : 7) : null,
+      updated_at: ready ? "2026-07-10T10:00:00Z" : "",
+      error: "",
+    },
+    sources: { kindle: true, obsidian: inObsidian, legacy: false },
+    destinations: {
+      obsidian: { state: inObsidian ? "synced" : "not_synced", reason: ready ? "" : "waiting_processing", last_synced_at: inObsidian ? "2026-07-10T10:00:00Z" : "" },
+      anki: { state: "not_exported", last_exported_at: "" },
+      quizlet: { state: "not_exported", last_exported_at: "" },
+    },
+    first_seen_at: "2026-07-10T10:00:00Z",
+    last_seen_at: "2026-07-10T10:00:00Z",
+    last_kindle_sync_id: "preview-sync",
+  };
+}
+
+let mockEntries = baseWords.map((_, index) => makeLexeme(index));
+const cancelledJobs = new Set<string>();
+let mockFailureConsumed = false;
+
+function mockConnectors(): ConnectorStatus {
+  const scenario = previewScenario();
+  return {
+    kindle: {
+      state: scenario === "disconnected" ? "disconnected" : "connected",
+      label: scenario === "disconnected" ? "Kindle" : "Kindle Paperwhite",
+      checked_at: new Date().toISOString(),
+    },
+    obsidian: {
+      state: scenario === "obsidian-error" ? "error" : "connected",
+      label: "Obsidian",
+      checked_at: new Date().toISOString(),
+    },
+  };
+}
+
+function buildBooks(entries: LexemeRecord[]): BookOption[] {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    for (const key of new Set(entry.occurrences.map((item) => item.book_key).filter(Boolean))) {
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  return [{ label: "Все книги", key: "" }, ...Array.from(counts, ([key, count]) => ({ label: `${key} · ${count}`, key }))];
+}
+
+function libraryResult(): LibraryResult {
+  return {
+    sourceName: "Preview library",
+    sourceStatus: "Локальная библиотека готова",
+    books: buildBooks(mockEntries),
+    entries: mockEntries,
+    last_kindle_sync_id: "preview-sync",
+    connectors: mockConnectors(),
+  };
+}
+
 async function mockBackend<T>(action: string, payload: unknown): Promise<T> {
-  await new Promise((resolve) => setTimeout(resolve, 320));
-  if (action === "load_settings") {
-    return { ...defaultSettings } as T;
+  const slowOperation = previewScenario() === "slow" && ["process_lexemes", "sync_obsidian"].includes(action);
+  await new Promise((resolve) => setTimeout(resolve, action === "connector_status" ? 80 : slowOperation ? 2500 : 280));
+  const requestJobId = (payload as { job_id?: string } | undefined)?.job_id;
+  if (requestJobId && cancelledJobs.delete(requestJobId)) throw new Error("Операция отменена");
+  if (previewScenario() === "operation-error" && action === "process_lexemes" && !mockFailureConsumed) {
+    mockFailureConsumed = true;
+    throw new Error("Тестовая ошибка offline-обработки");
   }
-  if (action === "save_settings") {
-    return { saved: true } as T;
-  }
-  if (action === "load_obsidian") {
-    return {
-      sourceName: "Demo Obsidian vault",
-      sourceStatus: "Preview-словарь загружен из Obsidian",
-      books: demoBooks,
-      entries: demoEntries.map((entry) => ({ ...entry, processing_status: "processed", analysis: undefined })),
-    } as T;
+  if (action === "load_settings") return { ...defaultSettings, obsidian_sync_enabled: true, obsidian_vault_path: "preview" } as T;
+  if (action === "save_settings") return { saved: true } as T;
+  if (action === "connector_status") return mockConnectors() as T;
+  if (["load_library", "load_cached", "sync_kindle", "scan"].includes(action)) return libraryResult() as T;
+  if (["process_lexemes", "optimize"].includes(action)) {
+    const ids = new Set((payload as { ids?: string[] })?.ids ?? []);
+    mockEntries = mockEntries.map((entry) =>
+      ids.has(entry.id)
+        ? { ...entry, processing: { state: "ready", analysis: analysis(entry.lemma, 6), updated_at: new Date().toISOString(), error: "" } }
+        : entry,
+    );
+    return { processed_new: ids.size, accepted_new: ids.size, rejected_new: 0, skipped_existing: 0, entries: mockEntries } as T;
   }
   if (action === "sync_obsidian") {
-    return { added: 0, skipped: 0, files: [], backup_path: "preview/backup" } as T;
+    const pendingSync = mockEntries.filter((entry) => entry.destinations.obsidian.state !== "synced");
+    const items = pendingSync.map((entry) => ({ id: entry.id, outcome: entry.processing.state === "ready" ? "added" : "blocked", reason: entry.processing.state === "ready" ? "" : "waiting_processing" }));
+    mockEntries = mockEntries.map((entry) =>
+      entry.processing.state === "ready"
+        ? { ...entry, sources: { ...entry.sources, obsidian: true }, destinations: { ...entry.destinations, obsidian: { state: "synced", reason: "", last_synced_at: new Date().toISOString() } } }
+        : entry,
+    );
+    return { added: items.filter((item) => item.outcome === "added").length, skipped: items.filter((item) => item.outcome !== "added").length, files: ["Priority 7.md"], backup_path: "preview", items, entries: mockEntries } as T;
   }
-  if (action === "scan" || action === "load_demo" || action === "load_cached") {
-    return {
-      sourceName: action === "scan" ? "Demo Kindle Paperwhite" : "Demo Kindle",
-      sourceStatus: "Preview-словарь загружен",
-      books: demoBooks,
-      entries: demoEntries.map((entry) => ({ ...entry, processing_status: "raw", analysis: undefined })),
-    } as T;
-  }
-  if (action === "optimize") {
-    const entries = (payload as { entries?: VocabEntry[] })?.entries ?? demoEntries;
-    return {
-      accepted_new: entries.length,
-      processed_new: entries.length,
-      skipped_existing: 0,
-      rejected_new: 0,
-      tsv_path: "preview/optimized.tsv",
-      entry_updates: entries.map((entry) => ({
-        id: entry.id,
-        processing_status: "processed",
-        analysis: {
-          base_form: entry.stem || entry.word,
-          pos: "offline",
-          accepted: true,
-          importance_score: Math.max(2, Math.min(8, Math.round(entry.word.length * 0.7))),
-          importance_note: "оценено локальными правилами",
-          frequency_note: "lemma Zipf 3.8, form Zipf 3.6",
-          lemma_zipf: 3.8,
-          form_zipf: 3.6,
-          wordnet_synset_count: 4,
-          wordnet_pos_count: 2,
-          warnings: [],
-          tags: "priority_medium preview",
-          source_word_forms: [entry.word],
-          source_occurrence_count: 1,
-          translation_status: "offline_only",
-          tsv_path: "preview/optimized.tsv",
-        },
-      })),
-      events: [
-        {
-          phase: "answered",
-          title: "Offline processing",
-          message: `${entries.length} слов получили локальную оценку сложности и базовую форму.`,
-          meta: "Python",
-        },
-      ],
-    } as T;
-  }
-  if (action === "export") {
-    const entries = (payload as { entries?: VocabEntry[] })?.entries ?? [];
-    return { path: "preview/export.tsv", exported: entries.length } as T;
-  }
+  if (action === "export") return { path: "preview/export.tsv", exported: (payload as { entries?: unknown[] })?.entries?.length ?? 0 } as T;
   return {} as T;
 }

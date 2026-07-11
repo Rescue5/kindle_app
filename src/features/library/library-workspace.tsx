@@ -105,7 +105,6 @@ export const LibraryWorkspace = React.memo(function LibraryWorkspace({ controlle
 
 function ConnectorButton({ kind, info, onClick, disabled }: { kind: "kindle" | "obsidian"; info: ConnectorInfo; onClick: () => void; disabled: boolean }) {
   const connected = info.state === "connected";
-  const checking = info.state === "checking";
   const isObsidian = kind === "obsidian";
   const Icon = isObsidian ? Database : HardDrive;
   const activeClass = isObsidian
@@ -113,7 +112,7 @@ function ConnectorButton({ kind, info, onClick, disabled }: { kind: "kindle" | "
     : "border-sky-500/35 bg-sky-500/10 text-sky-200 shadow-[0_0_16px_rgba(56,189,248,0.10)]";
   return (
     <Button variant="secondary" size="sm" onClick={onClick} disabled={disabled} className={connected ? activeClass : ""} title={`${info.label}: ${connectorLabel(info.state)}`}>
-      {checking ? <Loader2 size={14} className="animate-spin" /> : <Icon size={14} />}
+      <Icon size={14} />
       {isObsidian ? "Obsidian" : "Kindle"}
       <span className={`h-1.5 w-1.5 rounded-full ${connected ? (isObsidian ? "bg-purple-300" : "bg-sky-300") : info.state === "error" ? "bg-destructive" : "bg-muted-foreground/60"}`} />
     </Button>
@@ -121,7 +120,7 @@ function ConnectorButton({ kind, info, onClick, disabled }: { kind: "kindle" | "
 }
 
 function ConnectorNotice({ connector }: { connector: ConnectorInfo }) {
-  if (connector.state === "connected") return null;
+  if (connector.state !== "disconnected") return null;
   return (
     <div className="flex items-center gap-2 border-b border-line bg-panel-raised/35 px-5 py-2 text-xs text-muted-foreground">
       <CloudOff size={14} className="text-warning" />

@@ -126,7 +126,6 @@ export function useLibraryController() {
 
   const probeConnectors = React.useCallback(async () => {
     if (document.visibilityState !== "visible") return;
-    setConnectors((current) => ({ ...current, kindle: { ...current.kindle, state: "checking" } }));
     try {
       const status = await callBackend<ConnectorStatus>("connector_status", {});
       setConnectors(status);

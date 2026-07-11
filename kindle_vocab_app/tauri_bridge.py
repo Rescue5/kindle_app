@@ -14,6 +14,7 @@ from kindle_vocab_app import obsidian_sync, settings, vocab_cache
 from kindle_vocab_app.kindle_db import fetch_entries, list_books, validate_vocab_db
 from kindle_vocab_app.kindle_device import find_kindle_source
 from kindle_vocab_app.logging_config import configure_logging, get_logger
+from kindle_vocab_app.processing_state import ProcessedSnapshot
 from kindle_vocab_app.tsv_schema import OPTIMIZED_TSV_HEADER
 from kindle_vocab_app.vocab_optimizer import optimize_entries
 
@@ -132,12 +133,26 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
             ),
         )
         analyses = _analysis_by_lemma(result.analysis_dir)
+        snapshot = ProcessedSnapshot.load(result.snapshot_path)
         for index, lexeme in enumerate(selected, 1):
-            analysis = analyses.get(vocab_cache.normalize_lemma(str(lexeme.get("lemma") or "")))
+            lemma_key = vocab_cache.normalize_lemma(str(lexeme.get("lemma") or ""))
+            forms = {vocab_cache.normalize_lemma(str(form)) for form in lexeme.get("forms") or []}
+            display_key = vocab_cache.normalize_lemma(str(lexeme.get("display_form") or ""))
+            analysis = analyses.get(lemma_key)
             if analysis is None:
                 previous = (lexeme.get("processing") or {}).get("analysis")
                 if previous:
                     analysis = previous
+            if analysis is None:
+                for key, candidate in analyses.items():
+                    if key in forms or key == display_key:
+                        analysis = candidate
+                        break
+            if analysis is None:
+                for key in {lemma_key, display_key, *forms}:
+                    if snapshot.has_processed(key):
+                        analysis = _analysis_from_snapshot(snapshot.processed[key])
+                        break
             if analysis is None:
                 lexeme["processing"] = {
                     "state": "failed",
@@ -385,6 +400,28 @@ def _analysis_by_lemma(analysis_dir: Path) -> dict[str, dict[str, Any]]:
         if key:
             result[key] = analysis
     return result
+
+
+def _analysis_from_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a minimal analysis dict from a processed-snapshot entry."""
+    return {
+        "base_form": str(payload.get("base_form") or ""),
+        "pos": "",
+        "accepted": bool(payload.get("accepted", True)),
+        "importance_score": payload.get("importance"),
+        "importance_note": "уже обработано ранее",
+        "frequency_note": "",
+        "lemma_zipf": None,
+        "form_zipf": None,
+        "wordnet_synset_count": None,
+        "wordnet_pos_count": None,
+        "warnings": [],
+        "tags": "",
+        "source_word_forms": list(payload.get("source_word_forms") or []),
+        "source_occurrence_count": payload.get("source_occurrence_count"),
+        "processed_at": str(payload.get("last_seen_at") or ""),
+        "translation_status": "offline_only",
+    }
 
 
 def _configure_stdio() -> None:

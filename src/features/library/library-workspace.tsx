@@ -138,16 +138,65 @@ function QuickFilterButton({ label, value, filter, current, onChange, obsidian =
   );
 }
 
+const ITEM_HEIGHT = 48;
+const OVERSCAN = 5;
+
 const LexemeTable = React.memo(function LexemeTable({ entries, selectedId, onSelect, obsidianEnabled, loading }: { entries: LexemeRecord[]; selectedId: string; onSelect: (id: string) => void; obsidianEnabled: boolean; loading: boolean }) {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = React.useState(0);
+  const [viewportHeight, setViewportHeight] = React.useState(0);
+
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => {
+      setScrollTop(el.scrollTop);
+      setViewportHeight(el.clientHeight);
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    return () => {
+      el.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el || !selectedId) return;
+    const index = entries.findIndex((entry) => entry.id === selectedId);
+    if (index === -1) return;
+    const rowTop = index * ITEM_HEIGHT;
+    const rowBottom = rowTop + ITEM_HEIGHT;
+    const viewTop = el.scrollTop;
+    const viewBottom = viewTop + el.clientHeight;
+    if (rowTop < viewTop || rowBottom > viewBottom) {
+      el.scrollTo({ top: rowTop, behavior: "auto" });
+    }
+  }, [selectedId, entries]);
+
   if (loading) return <div className="grid min-h-0 flex-1 place-items-center text-sm text-muted-foreground"><Loader2 size={20} className="mb-2 animate-spin" />Загружаем локальный каталог</div>;
   if (!entries.length) return <EmptyLibrary />;
+
+  const totalHeight = entries.length * ITEM_HEIGHT;
+  const startIndex = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - OVERSCAN);
+  const endIndex = Math.min(entries.length - 1, Math.ceil((scrollTop + viewportHeight) / ITEM_HEIGHT) + OVERSCAN);
+  const topHeight = startIndex * ITEM_HEIGHT;
+  const bottomHeight = Math.max(0, (entries.length - endIndex - 1) * ITEM_HEIGHT);
+  const visibleEntries = entries.slice(startIndex, endIndex + 1);
+
   return (
     <div className="min-h-0 flex-1 overflow-hidden">
       <div className={`grid h-10 items-center border-b border-line bg-panel-raised/25 px-5 text-[11px] font-medium uppercase text-muted-foreground ${obsidianEnabled ? "grid-cols-[minmax(105px,.75fr)_minmax(170px,1.45fr)_minmax(105px,.85fr)_112px_104px]" : "grid-cols-[minmax(110px,.8fr)_minmax(190px,1.5fr)_minmax(115px,.9fr)_118px]"}`}>
         <span>Лемма</span><span>Последний контекст</span><span>Книга</span><span>Обработка</span>{obsidianEnabled ? <span>Obsidian</span> : null}
       </div>
-      <div className="app-scrollbar h-[calc(100%-2.5rem)] overflow-y-auto">
-        {entries.map((entry) => <LexemeRow key={entry.id} entry={entry} selected={entry.id === selectedId} onSelect={onSelect} obsidianEnabled={obsidianEnabled} />)}
+      <div ref={containerRef} className="app-scrollbar h-[calc(100%-2.5rem)] overflow-y-auto">
+        {topHeight > 0 ? <div style={{ height: topHeight, gridColumn: "1 / -1" }} /> : null}
+        {visibleEntries.map((entry) => (
+          <LexemeRow key={entry.id} entry={entry} selected={entry.id === selectedId} onSelect={onSelect} obsidianEnabled={obsidianEnabled} />
+        ))}
+        {bottomHeight > 0 ? <div style={{ height: bottomHeight, gridColumn: "1 / -1" }} /> : null}
       </div>
     </div>
   );
@@ -264,7 +313,7 @@ function OperationRail({ operation, onRetry, onDismiss }: { operation: Operation
   const expanded = operation.status !== "idle";
   const progress = operation.total > 0 ? `${operation.current}/${operation.total}` : "";
   return (
-    <motion.section layout className="flex-none border-t border-line bg-background/45 px-5 py-3">
+    <motion.section className="flex-none border-t border-line bg-background/45 px-5 py-3">
       <div className="flex items-center gap-3">
         <OperationIcon operation={operation} />
         <div className="min-w-0 flex-1">

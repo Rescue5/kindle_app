@@ -46,7 +46,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
     job_id = str(payload.get("job_id") or "")
 
     if action in {"load_library", "load_cached"}:
-        catalog = _load_catalog_with_sources(workspace)
+        catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
         return _catalog_response(catalog, connector_status=_connector_status(workspace, probe_kindle=False))
 
     if action == "connector_status":
@@ -55,7 +55,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
     if action in {"sync_kindle", "scan"}:
         _emit_progress(job_id, "detecting", "Ищем подключённый Kindle", 0, 4)
         source = find_kindle_source()
-        catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False)
+        catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
         if source is None:
             logger.info("Kindle synchronization skipped job_id=%s reason=disconnected", job_id)
             disconnected = _connector_status(workspace, probe_kindle=False)
@@ -99,7 +99,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         export_format = str(payload.get("format") or "anki")
         output = workspace / ".app-data" / f"kindle-{export_format}.tsv"
         exported = export_frontend_entries(entries, output, export_format, workspace)
-        catalog = vocab_cache.load(workspace) or vocab_cache.empty_catalog()
+        catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
         exported_ids = {str(item.get("id") or "") for item in payload.get("entries") or []}
         now = vocab_cache.utc_now()
         for lexeme in catalog["lexemes"]:
@@ -109,7 +109,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         return {"path": str(output), "exported": exported}
 
     if action in {"process_lexemes", "optimize"}:
-        catalog = _load_catalog_with_sources(workspace)
+        catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
         requested_ids = {str(value) for value in payload.get("ids") or []}
         if not requested_ids and payload.get("entries"):
             requested_ids = {str(item.get("id") or "") for item in payload.get("entries") or []}
@@ -248,7 +248,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         if not vault_path or not cards_path:
             raise ValueError("vault_path and cards_path are required")
         cards_dir = Path(vault_path) / cards_path
-        catalog = vocab_cache.load(workspace) or vocab_cache.empty_catalog()
+        catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
         entries = obsidian_sync.read_cards(cards_dir)
         catalog = vocab_cache.merge_obsidian(catalog, entries)
         vocab_cache.save(workspace, catalog)
@@ -261,7 +261,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         backup_enabled = bool(payload.get("backup_enabled", app_settings.obsidian_backup_enabled))
         if not vault_path or not cards_path:
             raise ValueError("vault_path and cards_path are required")
-        catalog = _load_catalog_with_sources(workspace)
+        catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
         entries = [_lexeme_as_entry(item) for item in catalog["lexemes"] if (item.get("destinations") or {}).get("obsidian", {}).get("state") != "synced"]
         cards_dir = Path(vault_path) / cards_path
         backups_dir = workspace / ".app-data" / "obsidian-backups"
@@ -316,7 +316,7 @@ def _emit_progress(
     sys.stderr.flush()
 
 
-def _load_catalog_with_sources(workspace: Path, *, reconcile_kindle: bool = True) -> dict[str, Any]:
+def _load_catalog_with_sources(workspace: Path, *, reconcile_kindle: bool = True, reconcile_obsidian: bool = True) -> dict[str, Any]:
     catalog = vocab_cache.load(workspace) or vocab_cache.empty_catalog()
     if reconcile_kindle:
         cached_db = workspace / ".app-data" / "cache" / "vocab.db"
@@ -334,7 +334,7 @@ def _load_catalog_with_sources(workspace: Path, *, reconcile_kindle: bool = True
                 logger.exception("Failed to reconcile cached Kindle database")
 
     app_settings = settings.load(workspace)
-    if app_settings.obsidian_sync_enabled and app_settings.obsidian_vault_path and app_settings.obsidian_cards_path:
+    if reconcile_obsidian and app_settings.obsidian_sync_enabled and app_settings.obsidian_vault_path and app_settings.obsidian_cards_path:
         cards_dir = Path(app_settings.obsidian_vault_path) / app_settings.obsidian_cards_path
         try:
             catalog = vocab_cache.merge_obsidian(catalog, obsidian_sync.read_cards(cards_dir))

@@ -251,3 +251,155 @@ cards without writing to the vault.
 - The remaining Obsidian queue consists of ready entries awaiting sync and
   rejected entries with explicit blocking reasons. No vault files were written
   during this verification.
+
+## 2026-07-12 - Kimi - Step 1: async python_bridge with spawn_blocking
+
+### Goal
+
+Make the Tauri `python_bridge` command asynchronous and offload the blocking
+Python child-process wait to `tauri::async_runtime::spawn_blocking`, preventing
+the Tauri main/UI thread from blocking during backend calls.
+
+### Changes
+
+- `src-tauri/src/main.rs`:
+  - Converted `python_bridge` to `async fn` while preserving its
+    `Result<Value, String>` frontend contract.
+  - Wrapped the managed `OperationState` in `Arc<OperationState>` so it can be
+    cloned into the async task and its Drop guard.
+  - Added `CancellationTokenGuard` to guarantee removal of the cancellation
+    token from `OperationState` even if `spawn_blocking` panics or returns an
+    error.
+  - Changed `run_python_bridge` to accept `Arc<AtomicBool>` instead of
+    `&AtomicBool` for `'static` use inside `spawn_blocking`.
+  - Kept `cancel_python_bridge` synchronous and kept the JSON contract and
+    progress event emission logic unchanged.
+
+### Verification
+
+- `cargo check` inside `src-tauri`: passed.
+- `npm run build`: passed (1,996 modules transformed).
+
+### Remaining Risk
+
+- The change compiles and builds, but the actual WebView→Rust→Python latency
+  improvement was not measured with a running Tauri app in this step.
+- Concurrent cancellation during a blocking backend call is logically preserved,
+  but not exercised by an automated end-to-end test yet.
+
+## 2026-07-12 - Kimi - Step 2: avoid heavy reconciliation on read-only library loads
+
+### Goal
+
+Stop re-reconciling Kindle and Obsidian data on every `load_library`/`load_cached`
+call. Heavy reconciliation should only happen during explicit actions that mutate
+the catalog.
+
+### Changes
+
+- `kindle_vocab_app/tauri_bridge.py`:
+  - Added `reconcile_obsidian: bool = True` to `_load_catalog_with_sources` while
+    keeping the existing `reconcile_kindle: bool = True` default.
+  - Changed `load_library`/`load_cached` to call with both reconciliation flags
+    set to `False`.
+  - Changed `sync_kindle`/`scan`, `process_lexemes`/`optimize`, `export`,
+    `load_obsidian`, and `sync_obsidian` to call with both flags set to `False`;
+    these handlers apply their own targeted Kindle/Obsidian updates afterwards.
+  - No response shapes or other logic were changed.
+
+### Verification
+
+- `python -m compileall kindle_vocab_app`: passed.
+- `conda run -n kindle_app python -m unittest discover -s tests -v`: 11 tests
+  passed.
+- The base-env run failed only because the `wordfreq` dependency is not installed
+  outside the `kindle_app` conda environment; this is environmental, not a code
+  regression.
+
+### Remaining Risk
+
+- `load_obsidian` now goes through `_load_catalog_with_sources` (which saves the
+  catalog and refreshes destination states) before applying its own Obsidian
+  merge. This matches the new contract but adds a small amount of redundant I/O
+  compared to the previous direct `vocab_cache.load` call.
+
+## 2026-07-12 - Kimi - Frontend performance fix Steps 3–6
+
+### Goal
+
+Reduce React re-renders, debounce search input, remove forced layout in the
+operation rail, reduce connector probing frequency, and virtualize the lexeme
+table.
+
+### Changes
+
+- `src/features/library/use-library-controller.ts`:
+  - Replaced `React.useDeferredValue(query)` with an explicit `debouncedQuery`
+    state updated via `setTimeout(..., 180)` and cleared on unmount/query
+    change. The controlled `<Input>` still uses `query`; filtering uses
+    `debouncedQuery`.
+  - Increased the `connector_status` probe interval from 5 s to 30 s.
+  - Added a `lastProbedAt` ref that skips interval/focus probes occurring
+    sooner than 30 s after the previous probe. Explicit probes (e.g. after a
+    Kindle sync) still run immediately via a new `force` argument.
+  - Wrapped the returned controller object in `React.useMemo` with all
+    primitives, derived values, and callbacks as dependencies, giving
+    `LibraryWorkspace`'s `React.memo` a stable reference.
+
+- `src/features/library/library-workspace.tsx`:
+  - Removed the `layout` prop from `motion.section` in `OperationRail`; the
+    `AnimatePresence` height animation remains.
+  - Virtualized `LexemeTable`: tracks `scrollTop`/`clientHeight` of the scroll
+    container, renders an overscan slice (±5 rows) with spacer rows before and
+    after, and scrolls the selected row into view when it leaves the visible
+    window. `LexemeRow` and its `React.memo` are unchanged.
+
+### Verification
+
+- `npm test`: 3 Vitest tests passed.
+- `npm run build`: passed; 1,996 modules transformed.
+- `git diff --check`: passed (only expected Windows line-ending warnings).
+
+### Remaining Risk
+
+- The virtualized list assumes a fixed 48 px row height. Rows with unusually
+    long lemmata or contexts could grow slightly, causing minor scroll drift;
+    visual QA on a large real library is recommended.
+- Connector probes are now spaced 30 s apart; users connecting/disconnecting a
+    Kindle between probes will see the state update only on the next scheduled
+    probe or an explicit sync action.
+
+## 2026-07-12 - Kimi - Integrated performance fixes
+
+### Goal
+
+Integrate the async Tauri bridge, Python reconciliation flags, and frontend
+performance improvements, then verify the combined change.
+
+### Integration
+
+- Reviewed the three parallel coder outputs (Rust async bridge, Python reconcile
+  flags, frontend memoization/virtualization).
+- Confirmed no overlapping file edits and no JSON contract changes.
+- Verified that `CancellationTokenGuard` removes the token even if the blocking
+  task panics.
+- Confirmed `_load_catalog_with_sources` defaults remain backward-compatible.
+- Checked that the virtualized table preserves grid columns and scrolls selected
+  rows into view.
+
+### Verification
+
+- `cargo check` inside `src-tauri`: passed.
+- `conda run -n kindle_app python -m compileall kindle_vocab_app`: passed.
+- `conda run -n kindle_app python -m unittest discover -s tests -v`: 11 tests
+  passed.
+- `npm test`: 3 Vitest tests passed.
+- `npm run build`: passed; 1,996 modules transformed.
+- `git diff --check`: passed (only expected Windows line-ending warnings).
+
+### Remaining Risk
+
+- Real-world Tauri UI smoothness (window move/resize during heavy operations)
+  was not measured in this environment because no live WebView profiling tool
+  is available here.
+- Visual QA of the virtualized table with a very large library is recommended.

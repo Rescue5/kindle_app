@@ -40,7 +40,17 @@ export function useLibraryController() {
   const [connectors, setConnectors] = React.useState<ConnectorStatus>(unknownConnectors);
   const [settings, setSettings] = React.useState<AppSettings>(defaultSettings);
   const [query, setQuery] = React.useState("");
-  const deferredQuery = React.useDeferredValue(query);
+  const [debouncedQuery, setDebouncedQuery] = React.useState("");
+  const debounceRef = React.useRef<number | null>(null);
+  React.useEffect(() => {
+    debounceRef.current = window.setTimeout(() => setDebouncedQuery(query), 180);
+    return () => {
+      if (debounceRef.current !== null) {
+        window.clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
+    };
+  }, [query]);
   const [selectedBookKey, setSelectedBookKey] = React.useState("");
   const [quickFilter, setQuickFilter] = React.useState<QuickFilter>("all");
   const [selectedId, setSelectedId] = React.useState("");
@@ -54,8 +64,8 @@ export function useLibraryController() {
     [books, selectedBookKey],
   );
   const visibleEntries = React.useMemo(
-    () => filterLexemes(entries, deferredQuery, selectedBook, quickFilter),
-    [entries, deferredQuery, selectedBook, quickFilter],
+    () => filterLexemes(entries, debouncedQuery, selectedBook, quickFilter),
+    [entries, debouncedQuery, selectedBook, quickFilter],
   );
   const selectedEntry = React.useMemo(
     () => visibleEntries.find((entry) => entry.id === selectedId) ?? visibleEntries[0] ?? null,
@@ -124,8 +134,11 @@ export function useLibraryController() {
     return () => unlisten();
   }, []);
 
-  const probeConnectors = React.useCallback(async () => {
+  const lastProbedAt = React.useRef(0);
+  const probeConnectors = React.useCallback(async (force = false) => {
     if (document.visibilityState !== "visible") return;
+    if (!force && Date.now() - lastProbedAt.current < 30000) return;
+    lastProbedAt.current = Date.now();
     try {
       const status = await callBackend<ConnectorStatus>("connector_status", {});
       setConnectors(status);
@@ -136,7 +149,7 @@ export function useLibraryController() {
 
   React.useEffect(() => {
     void probeConnectors();
-    const interval = window.setInterval(() => void probeConnectors(), 5000);
+    const interval = window.setInterval(() => void probeConnectors(), 30000);
     const onVisibility = () => {
       if (document.visibilityState === "visible") void probeConnectors();
     };
@@ -181,7 +194,7 @@ export function useLibraryController() {
     } catch (error) {
       fail(id, "Синхронизация Kindle остановлена", error);
     } finally {
-      void probeConnectors();
+      void probeConnectors(true);
     }
   }, [applyLibrary, begin, fail, probeConnectors]);
 
@@ -243,31 +256,60 @@ export function useLibraryController() {
 
   const dismissOperation = React.useCallback(() => setOperation(idleOperation), []);
 
-  return {
-    entries,
-    books,
-    connectors,
-    settings,
-    setSettings,
-    query,
-    setQuery,
-    selectedBookKey,
-    setSelectedBookKey,
-    quickFilter,
-    setQuickFilter,
-    selectedId,
-    setSelectedId,
-    visibleEntries,
-    selectedEntry,
-    operation,
-    loading,
-    syncKindle,
-    processVisible,
-    syncObsidian,
-    exportVisible,
-    cancel,
-    retry,
-    dismissOperation,
-    loadLibrary,
-  };
+  return React.useMemo(
+    () => ({
+      entries,
+      books,
+      connectors,
+      settings,
+      setSettings,
+      query,
+      setQuery,
+      selectedBookKey,
+      setSelectedBookKey,
+      quickFilter,
+      setQuickFilter,
+      selectedId,
+      setSelectedId,
+      visibleEntries,
+      selectedEntry,
+      operation,
+      loading,
+      syncKindle,
+      processVisible,
+      syncObsidian,
+      exportVisible,
+      cancel,
+      retry,
+      dismissOperation,
+      loadLibrary,
+    }),
+    [
+      entries,
+      books,
+      connectors,
+      settings,
+      setSettings,
+      query,
+      setQuery,
+      selectedBookKey,
+      setSelectedBookKey,
+      quickFilter,
+      setQuickFilter,
+      selectedId,
+      setSelectedId,
+      visibleEntries,
+      selectedEntry,
+      operation,
+      loading,
+      syncKindle,
+      processVisible,
+      syncObsidian,
+      exportVisible,
+      cancel,
+      retry,
+      dismissOperation,
+      loadLibrary,
+    ],
+  );
 }

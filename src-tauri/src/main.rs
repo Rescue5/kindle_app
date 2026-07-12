@@ -16,10 +16,25 @@ struct OperationState {
     cancellation: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
+struct CancellationTokenGuard {
+    operations: Arc<OperationState>,
+    job_id: String,
+}
+
+impl Drop for CancellationTokenGuard {
+    fn drop(&mut self) {
+        if !self.job_id.is_empty() {
+            if let Ok(mut registry) = self.operations.cancellation.lock() {
+                registry.remove(&self.job_id);
+            }
+        }
+    }
+}
+
 #[tauri::command]
-fn python_bridge(
+async fn python_bridge(
     app: AppHandle,
-    operations: State<'_, OperationState>,
+    operations: State<'_, Arc<OperationState>>,
     action: String,
     payload: Value,
 ) -> Result<Value, String> {
@@ -35,6 +50,7 @@ fn python_bridge(
         "payload": payload
     });
 
+    let operations = Arc::clone(&operations);
     let cancellation = Arc::new(AtomicBool::new(false));
     if !job_id.is_empty() {
         operations
@@ -43,14 +59,20 @@ fn python_bridge(
             .map_err(|_| "operation registry is poisoned".to_string())?
             .insert(job_id.clone(), Arc::clone(&cancellation));
     }
+    let _guard = CancellationTokenGuard {
+        operations,
+        job_id: job_id.clone(),
+    };
 
-    let result = run_python_bridge(app, python, workspace, request, &cancellation);
-    if !job_id.is_empty() {
-        if let Ok(mut registry) = operations.cancellation.lock() {
-            registry.remove(&job_id);
-        }
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        run_python_bridge(app, python, workspace, request, Arc::clone(&cancellation))
+    })
+    .await;
+
+    match result {
+        Ok(value) => value,
+        Err(_) => Err("Python bridge task panicked".to_string()),
     }
-    result
 }
 
 fn run_python_bridge(
@@ -58,7 +80,7 @@ fn run_python_bridge(
     python: String,
     workspace: PathBuf,
     request: Value,
-    cancellation: &AtomicBool,
+    cancellation: Arc<AtomicBool>,
 ) -> Result<Value, String> {
     let mut child = Command::new(python)
         .args(["-m", "kindle_vocab_app.tauri_bridge"])
@@ -140,7 +162,7 @@ fn run_python_bridge(
 }
 
 #[tauri::command]
-fn cancel_python_bridge(job_id: String, operations: State<'_, OperationState>) -> Result<bool, String> {
+fn cancel_python_bridge(job_id: String, operations: State<'_, Arc<OperationState>>) -> Result<bool, String> {
     let registry = operations
         .cancellation
         .lock()
@@ -167,7 +189,7 @@ fn workspace_dir() -> Result<PathBuf, std::io::Error> {
 
 fn main() {
     tauri::Builder::default()
-        .manage(OperationState::default())
+        .manage(Arc::new(OperationState::default()))
         .invoke_handler(tauri::generate_handler![python_bridge, cancel_python_bridge])
         .run(tauri::generate_context!())
         .expect("error while running Kindle Cards");

@@ -42,6 +42,31 @@ class KindleVocabSource:
         return _copy_path(self.path, cache_dir)
 
 
+@dataclass(frozen=True)
+class KindlePresence:
+    label: str
+    signature: tuple[str, ...]
+
+
+def find_kindle_presence(roots: Iterable[Path] | None = None) -> KindlePresence | None:
+    """Detect Kindle without opening its storage or locating vocab.db."""
+    if sys.platform == "win32" and roots is None:
+        presence = _find_windows_kindle_presence()
+        if presence is not None:
+            return presence
+
+    candidates = list(roots) if roots is not None else mounted_volume_roots()
+    for root in _unique_existing(candidates):
+        label = _volume_label(root)
+        if not _looks_like_kindle_identity(label, str(root)):
+            continue
+        return KindlePresence(
+            label=f"Kindle · {label or root.anchor or 'USB'}",
+            signature=("volume", str(root).casefold()),
+        )
+    return None
+
+
 def find_kindle_source(roots: Iterable[Path] | None = None) -> KindleVocabSource | None:
     logger.info(
         "Searching for Kindle source roots=%s platform=%s",
@@ -156,6 +181,36 @@ def _find_windows_mtp_vocab() -> KindleVocabSource | None:
     return None
 
 
+def _find_windows_kindle_presence() -> KindlePresence | None:
+    """Enumerate only top-level This PC items; never browse device contents."""
+    try:
+        import pythoncom
+        import win32com.client
+
+        pythoncom.CoInitialize()
+        shell = win32com.client.Dispatch("Shell.Application")
+        this_pc = shell.Namespace(17)
+        if this_pc is None:
+            return None
+
+        for device in _shell_items(this_pc.Items()):
+            try:
+                name = str(device.Name or "")
+                path = str(device.Path or "")
+            except Exception as exc:
+                logger.debug("Cannot inspect top-level Windows device error=%s", exc)
+                continue
+            if not _looks_like_kindle_identity(name, path):
+                continue
+            return KindlePresence(
+                label=f"Kindle · {name or 'USB'}",
+                signature=("windows-device", path.casefold(), name.casefold()),
+            )
+    except Exception as exc:
+        logger.debug("Passive Windows Kindle detection unavailable error=%s", exc)
+    return None
+
+
 def _find_vocab_in_shell_device(device: Any) -> tuple[Any, Any] | None:
     for storage in _shell_items(device.GetFolder.Items()):
         if not bool(storage.IsFolder):
@@ -243,6 +298,32 @@ def _copy_path(source: Path, cache_dir: Path) -> Path:
 
 def _looks_like_drive_path(path: str) -> bool:
     return len(path) >= 3 and path[1:3] == ":\\"
+
+
+def _looks_like_kindle_identity(*values: str) -> bool:
+    return any("kindle" in str(value or "").casefold() for value in values)
+
+
+def _volume_label(root: Path) -> str:
+    if sys.platform != "win32":
+        return root.name
+    try:
+        volume_name = ctypes.create_unicode_buffer(261)
+        success = ctypes.windll.kernel32.GetVolumeInformationW(
+            str(root),
+            volume_name,
+            len(volume_name),
+            None,
+            None,
+            None,
+            None,
+            0,
+        )
+        if success and volume_name.value:
+            return volume_name.value
+    except (AttributeError, OSError):
+        pass
+    return root.name or root.anchor
 
 
 def _windows_volume_roots() -> list[Path]:

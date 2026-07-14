@@ -403,3 +403,256 @@ performance improvements, then verify the combined change.
   was not measured in this environment because no live WebView profiling tool
   is available here.
 - Visual QA of the virtualized table with a very large library is recommended.
+
+## 2026-07-13 - Kimi - Backend: restore skipped snapshot state and report skip count
+
+### Goal
+
+Fix the backend part of three reported issues:
+1. Provide a stable Kindle connection signature for frontend auto-sync detection.
+2. Restore `ready` processing state for lexemes already present in the processed snapshot when the catalog loads.
+3. Include the `skipped_existing` count in the offline-processing completion message so the UI can explain the numbers.
+
+### Changes
+
+- `kindle_vocab_app/tauri_bridge.py`:
+  - `_connector_status` now returns `signature` for a connected Kindle source using `source.signature` from `find_kindle_source()`.
+  - `_load_catalog_with_sources` now calls `_restore_ready_from_snapshot` after reconciliation and before saving. Pending lexemes whose normalized `lemma`, `display_form`, or any `form` matches a key in `.app-data/optimized/processed_snapshot.json` are marked `ready` with an analysis built by `_analysis_from_snapshot`.
+  - Added helpers `_restore_ready_from_snapshot` and `_lexeme_snapshot_keys`.
+  - The `process_lexemes`/`optimize` completion event message is now in Russian and includes the `skipped_existing` count: "Обработано: N; принято: N; отклонено: N; пропущено ранее: M".
+
+- `tests/test_tauri_bridge_smoke.py`:
+  - Replaced the old `test_process_lexemes_recovers_snapshot_using_normalized_candidate_key` with `test_load_catalog_restores_ready_state_from_snapshot`, which verifies the new catalog-load restore path.
+  - Added `test_process_lexemes_message_includes_skipped_existing_in_russian` to assert the Russian message and skip count.
+
+### Verification
+
+- `conda run -n kindle_app python -m compileall kindle_vocab_app`: passed.
+- `conda run -n kindle_app python -m unittest discover -s tests -v`: 12 tests passed.
+
+### Remaining Risk
+
+- The snapshot restore only matches by normalized lemma/forms; lexemes whose processed snapshot key differs from all stored forms will remain pending until reprocessed.
+- The new `signature` field in `_connector_status` is only present when a Kindle source is actually connected; the frontend must handle its absence on disconnected/unknown states.
+- Full cross-layer verification (npm test, npm run build, cargo check) is left to the integration pass.
+
+## 2026-07-13 - Kimi - Frontend auto-sync, table virtualization, and integration
+
+### Goal
+
+Complete the frontend and integration parts of the three reported issues:
+1. Auto-sync Kindle when the connector probe detects a new connection or device signature.
+2. Fix the virtualized lexeme table so it renders all visible rows on first mount.
+3. Wire the backend's Russian skip-count message through to the UI and verify the full stack.
+
+### Changes
+
+- `src/types.ts`:
+  - Added optional `signature?: string[]` to `ConnectorInfo`.
+
+- `src/lib/backend.ts`:
+  - `mockConnectors` now returns a stable `signature` for the connected Kindle preview source.
+
+- `src/features/library/use-library-controller.ts`:
+  - Added `prevConnectorsRef`, `lastAutoSyncSignatureRef`, and `syncKindleRef`.
+  - `probeConnectors` now compares the current Kindle state/signature with the previous probe and triggers `syncKindle` only on a genuine transition to `connected` or when a new signature appears, skipping duplicates and avoiding loops.
+  - `syncKindle` records the synced signature so the next probe does not re-trigger.
+  - `processVisible` now uses the backend's `message` if present and falls back to a Russian message that includes `skipped_existing`.
+
+- `src/features/library/library-workspace.tsx`:
+  - Replaced the post-mount viewport measurement with a callback ref that reads `clientHeight` synchronously when the scroll container is attached.
+  - Added a `ResizeObserver` to keep `viewportHeight` accurate on resize.
+  - Removed the mutable `containerRef` in favor of a `container` state variable, avoiding TypeScript readonly-ref issues.
+
+- `kindle_vocab_app/tauri_bridge.py`:
+  - Added a top-level `message` field to the `process_lexemes`/`optimize` response containing the same Russian skip-count text already used in the event array.
+
+### Verification
+
+- `npm test`: 3 Vitest tests passed.
+- `npm run build`: passed; 1,996 modules transformed.
+- `conda run -n kindle_app python -m compileall kindle_vocab_app`: passed.
+- `conda run -n kindle_app python -m unittest discover -s tests -v`: 12 tests passed.
+- `conda run -n kindle_app cargo check --manifest-path src-tauri/Cargo.toml`: passed.
+- `git diff --check`: passed (only expected Windows line-ending warning for `WORKLOG.md`).
+
+### Remaining Risk
+
+- Auto-sync is gated by the 30-second probe interval; a Kindle connected and disconnected within that window may be missed.
+- The virtualized table still assumes a fixed 48 px row height; unusually long content could cause minor scroll drift on very large libraries.
+- Live browser/Tauri screenshot QA was not performed in this environment.
+
+## 2026-07-13 - Kimi - Integration: auto-sync, table virtualization, and snapshot restore
+
+### Goal
+
+Integrate and verify the three reported fixes across frontend, backend, and contracts:
+1. Automatic Kindle sync when the device is connected or its signature changes.
+2. Virtualized lexeme table renders all visible rows on first paint.
+3. Processed-snapshot lexemes are restored to ready state and the skip count is reported in the UI.
+
+### Changes
+
+- `src/types.ts`: added optional `signature?: string[]` to `ConnectorInfo`.
+- `src/lib/backend.ts`: mock backend connector status now returns a stable `signature` for the Kindle preview source.
+- `src/features/library/use-library-controller.ts`:
+  - Tracks the previous connector status and the last auto-synced Kindle signature in refs.
+  - `probeConnectors` triggers `syncKindle` only on a genuine transition to `connected` or when the signature changes, avoiding duplicate syncs and loops.
+  - `processVisible` now includes `skipped_existing` in the completion message shown in the operation rail.
+- `src/features/library/library-workspace.tsx`: fixed the virtualized table initial render by measuring the scroll container through a callback ref and `ResizeObserver`, so `viewportHeight` is never stuck at 0.
+- `kindle_vocab_app/tauri_bridge.py`: already updated by the backend pass; verified that `_connector_status` returns `signature`, `_load_catalog_with_sources` restores snapshot state, and the completion event reports `skipped_existing` in Russian.
+- `tests/test_tauri_bridge_smoke.py`: already updated by the backend pass; tests pass.
+
+### Verification
+
+- `conda run -n kindle_app python -m compileall kindle_vocab_app`: passed.
+- `conda run -n kindle_app python -m unittest discover -s tests -v`: 12 tests passed.
+- `npm test`: 3 Vitest tests passed.
+- `npm run build`: passed; 1,996 modules transformed.
+- `conda run -n kindle_app cargo check --manifest-path src-tauri/Cargo.toml`: passed.
+- `git diff --check`: passed (only expected Windows line-ending warning for `WORKLOG.md`).
+
+### Remaining Risk
+
+- The snapshot restore currently marks every matched lexeme as `ready`, even if the snapshot entry was originally rejected (`accepted: false`). The analysis object preserves the correct `accepted` value, but the UI state does not reflect rejection. This matches the current instruction to set state to `ready`, but may need refinement if rejected snapshot entries exist in the wild.
+- First-render auto-sync may trigger an immediate `sync_kindle` when a Kindle is already connected at app startup; this is intentional but could surprise users who expected the app to stay on the cached library.
+- Real-world Tauri end-to-end verification (actual USB Kindle connection, auto-sync timing, and large-library table scrolling) was not performed in this environment.
+
+## 2026-07-13 - Kimi - Refine snapshot restore for rejected entries
+
+### Goal
+
+Ensure that lexemes restored from the processed snapshot reflect their original
+acceptance status instead of always appearing as `ready`.
+
+### Changes
+
+- `kindle_vocab_app/tauri_bridge.py`: `_restore_ready_from_snapshot` now sets
+  `processing.state` to `rejected` when the snapshot entry has `accepted: false`.
+- `tests/test_tauri_bridge_smoke.py`: added
+  `test_load_catalog_restores_rejected_state_from_snapshot` to cover the
+  rejected-restore path.
+
+### Verification
+
+- `conda run -n kindle_app python -m compileall kindle_vocab_app`: passed.
+- `conda run -n kindle_app python -m unittest discover -s tests -v`: 13 tests
+  passed.
+- `npm test`: 3 Vitest tests passed.
+- `npm run build`: passed; 1,996 modules transformed.
+- `conda run -n kindle_app cargo check --manifest-path src-tauri/Cargo.toml`:
+  passed.
+- `git diff --check`: passed (only expected Windows line-ending warnings).
+
+### Remaining Risk
+
+- Live USB Kindle auto-sync timing and large-library table virtualization were
+  not verified in this environment.
+
+## 2026-07-13 - Codex - Passive Kindle presence probing
+
+### Goal
+
+Keep automatic Kindle synchronization while preventing periodic connector
+checks from browsing device storage or opening `vocab.db`.
+
+### Changes
+
+- Added a lightweight `KindlePresence` detector that checks only top-level
+  devices shown by Windows under "This PC". Mounted-volume fallback checks the
+  volume identity but does not search folders.
+- `connector_status` now uses the passive detector. Full MTP/path traversal and
+  copying remain confined to `sync_kindle`.
+- Connector polling is limited to once per minute, overlapping probes are
+  suppressed, and failed automatic synchronization retries use a five-minute
+  backoff.
+- Added Python and Vitest coverage for the passive boundary and retry policy.
+
+### Verification
+
+- `conda run -n kindle_app python -m unittest discover -s tests -v`: 16 passed.
+- `conda run -n kindle_app python -m compileall kindle_vocab_app`: passed.
+- `npm test`: 6 passed.
+- `npm run build`: passed; 1,996 modules transformed.
+- `conda run -n kindle_app cargo check --manifest-path src-tauri/Cargo.toml`: passed.
+- `git diff --check`: passed with expected Windows line-ending warnings.
+
+### Device Safety
+
+- Background probes do not enumerate Kindle folders or copy files.
+- Synchronization copies `vocab.db` from Kindle to a local staging/cache path;
+  the application never writes, renames, or deletes files on the device.
+- A live passive probe reported the device as disconnected at verification
+  time, so the connected-device path remains covered by mocks rather than a
+  physical Kindle test.
+
+## 2026-07-14 - Codex - SQLite library and one-way Obsidian sync
+
+### Goal
+
+Replace competing JSON state files with one durable SQLite library, process new
+Kindle lexemes through a resumable queue, and make Obsidian a verified one-way
+destination rather than a source of vocabulary state.
+
+### Decisions
+
+- `.app-data/kindle_cards.sqlite3` is the authoritative application store.
+  Legacy catalog and snapshot JSON files are imported once and backed up, but
+  are no longer written by the application bridge.
+- Lexemes are unique by language and canonical key; forms and Kindle contexts
+  remain separate records, and context fingerprints prevent duplicate imports.
+- Queue items are committed one lexeme at a time. Accepted and rejected terminal
+  states are both durable and are not reanalysed when another form or context is
+  discovered.
+- Obsidian is read only for reconciliation. A sync rereads the vault, backs it
+  up, appends eligible cards, verifies the result, and only then records a
+  destination as synced.
+- Rejected lexemes remain visible under `Все`, but are excluded from `Новые`
+  and `Не в Obsidian`.
+
+### Changes
+
+- Added the versioned SQLite repository, migration, repository-level queue,
+  analysis, destination, and sync-run persistence.
+- Moved bridge loading, Kindle sync, processing, export state, and Obsidian
+  reconciliation to the repository. Added `process_queue` while preserving the
+  explicit `process_lexemes` compatibility action.
+- Hardened Obsidian append-only writes with exact prefix verification and
+  duplicate-lemma blocking inside a single sync batch.
+- Replaced the normal manual processing control with compact automatic queue
+  status and retry-on-error behavior. Fixed automatic queue resumption after a
+  Kindle operation completed.
+- Updated frontend contracts, filters, preview fixtures, project documentation,
+  and focused Python/Vitest coverage.
+
+### Local Migration Audit
+
+- Imported 1,039 canonical lexemes and 1,332 non-Obsidian occurrences.
+- Preserved 1,023 ready and 16 rejected states; the persistent queue is empty.
+- Reconciliation reports 1,022 synced, 16 not applicable, and 1 missing
+  Obsidian destination, repairing the previously stale synced state.
+- SQLite integrity check passed, foreign-key violations are zero, and both
+  legacy JSON backup files exist.
+- No Obsidian write was performed during the audit.
+
+### Verification
+
+- `conda run -n kindle_app python -m unittest discover -s tests`: 21 passed.
+- `conda run -n kindle_app python -m compileall -q kindle_vocab_app`: passed.
+- `npm test -- --run`: 8 passed.
+- `npm run build`: passed; 1,996 modules transformed.
+- `conda run -n kindle_app cargo check -q --manifest-path src-tauri/Cargo.toml`:
+  passed.
+- Bridge `load_library` smoke: 1,039 entries, zero pending/failed queue items.
+- Chromium QA at 1,440 x 900 confirmed automatic queue completion, accepted-only
+  `Новые`, eligible-only `Не в Obsidian`, bounded table scrolling, and zero
+  console errors or warnings.
+- `git diff --check`: passed with expected Windows line-ending warnings.
+
+### Remaining Risk
+
+- A physical Kindle was not connected during the final end-to-end run, so the
+  new SQLite path is covered by repository/bridge tests and the existing mocked
+  device boundary rather than a live USB sync.
+- The standalone optimizer CLI intentionally retains snapshot compatibility;
+  application runtime state is SQLite-only.

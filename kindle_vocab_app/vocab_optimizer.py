@@ -191,6 +191,39 @@ class OptimizationResult:
     rejected_new: int
 
 
+def analyze_entries_once(
+    entries: list[dict[str, Any]],
+    output_dir: Path,
+    *,
+    config_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Analyze entries without consulting persistent snapshot state.
+
+    The desktop application persists each returned result transactionally in
+    SQLite. The legacy snapshot-backed ``optimize_entries`` path remains
+    available for the standalone CLI.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    analysis_dir = output_dir / "word_analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    config = load_processing_config(config_path)
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for entry in entries:
+        candidate = _candidate_from_entry(entry)
+        if candidate is not None:
+            grouped[str(candidate["lexical_key"])].append(candidate)
+
+    analyses: list[dict[str, Any]] = []
+    for lexical_key, group in sorted(grouped.items()):
+        analysis = _analyze_group(lexical_key, group, config)
+        analyses.append(analysis)
+        _write_analysis_json(analysis_dir, lexical_key, analysis)
+    accepted = [analysis for analysis in analyses if analysis["accepted"]]
+    if accepted:
+        _write_optimized_tsv(output_dir / "optimized.tsv", accepted)
+    return analyses
+
+
 def optimize_entries(
     entries: list[dict[str, Any]],
     output_dir: Path,

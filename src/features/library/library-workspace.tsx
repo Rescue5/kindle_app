@@ -22,7 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
-import { counts, obsidianSyncReason, primaryOccurrence, processingLabel, processingTone, processable, type QuickFilter } from "./domain";
+import { counts, isAcceptedNew, obsidianSyncReason, primaryOccurrence, processingLabel, processingTone, type QuickFilter } from "./domain";
 import type { useLibraryController } from "./use-library-controller";
 import type { ConnectorInfo, LexemeRecord, Operation, WordAnalysis } from "@/types";
 
@@ -32,7 +32,6 @@ export const LibraryWorkspace = React.memo(function LibraryWorkspace({ controlle
   const [exportFormat, setExportFormat] = React.useState<"anki" | "quizlet">(controller.settings.default_export_format);
   React.useEffect(() => setExportFormat(controller.settings.default_export_format), [controller.settings.default_export_format]);
   const totals = React.useMemo(() => counts(controller.entries), [controller.entries]);
-  const processCount = React.useMemo(() => processable(controller.visibleEntries).length, [controller.visibleEntries]);
   const busy = controller.operation.status === "running";
   const obsidianEnabled = controller.settings.obsidian_sync_enabled;
 
@@ -55,10 +54,12 @@ export const LibraryWorkspace = React.memo(function LibraryWorkspace({ controlle
               {obsidianEnabled ? (
                 <ConnectorButton kind="obsidian" info={controller.connectors.obsidian} onClick={() => void controller.syncObsidian()} disabled={busy || controller.connectors.obsidian.state !== "connected"} />
               ) : null}
-              <Button size="sm" onClick={() => void controller.processVisible()} disabled={busy || processCount === 0}>
-                {controller.operation.kind === "processing" && busy ? <Loader2 size={14} className="animate-spin" /> : <Layers3 size={14} />}
-                Обработать {processCount > 0 ? <span className="tabular-nums opacity-75">{processCount}</span> : null}
-              </Button>
+              {controller.queueStatus.total > 0 ? (
+                <div className="flex h-8 items-center gap-1.5 rounded-[7px] border border-line bg-panel-raised/45 px-2.5 text-xs text-muted-foreground" title="Автоматическая очередь offline-обработки">
+                  {controller.operation.kind === "processing" && busy ? <Loader2 size={13} className="animate-spin text-primary" /> : <Layers3 size={13} />}
+                  <span className="tabular-nums">{controller.queueStatus.total}</span>
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -142,39 +143,46 @@ const ITEM_HEIGHT = 48;
 const OVERSCAN = 5;
 
 const LexemeTable = React.memo(function LexemeTable({ entries, selectedId, onSelect, obsidianEnabled, loading }: { entries: LexemeRecord[]; selectedId: string; onSelect: (id: string) => void; obsidianEnabled: boolean; loading: boolean }) {
-  const containerRef = React.useRef<HTMLDivElement>(null);
+  const [container, setContainer] = React.useState<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = React.useState(0);
   const [viewportHeight, setViewportHeight] = React.useState(0);
 
-  React.useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const update = () => {
-      setScrollTop(el.scrollTop);
+  const setContainerRef = React.useCallback((el: HTMLDivElement | null) => {
+    setContainer(el);
+    if (el) {
       setViewportHeight(el.clientHeight);
-    };
-    update();
-    el.addEventListener("scroll", update, { passive: true });
-    window.addEventListener("resize", update);
-    return () => {
-      el.removeEventListener("scroll", update);
-      window.removeEventListener("resize", update);
-    };
+      setScrollTop(el.scrollTop);
+    }
   }, []);
 
   React.useEffect(() => {
-    const el = containerRef.current;
-    if (!el || !selectedId) return;
+    if (!container) return;
+    const handleScroll = () => setScrollTop(container.scrollTop);
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setViewportHeight(entry.contentRect.height);
+      }
+    });
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    observer.observe(container);
+    return () => {
+      container.removeEventListener("scroll", handleScroll);
+      observer.disconnect();
+    };
+  }, [container]);
+
+  React.useEffect(() => {
+    if (!container || !selectedId) return;
     const index = entries.findIndex((entry) => entry.id === selectedId);
     if (index === -1) return;
     const rowTop = index * ITEM_HEIGHT;
     const rowBottom = rowTop + ITEM_HEIGHT;
-    const viewTop = el.scrollTop;
-    const viewBottom = viewTop + el.clientHeight;
+    const viewTop = container.scrollTop;
+    const viewBottom = viewTop + container.clientHeight;
     if (rowTop < viewTop || rowBottom > viewBottom) {
-      el.scrollTo({ top: rowTop, behavior: "auto" });
+      container.scrollTo({ top: rowTop, behavior: "auto" });
     }
-  }, [selectedId, entries]);
+  }, [selectedId, entries, container]);
 
   if (loading) return <div className="grid min-h-0 flex-1 place-items-center text-sm text-muted-foreground"><Loader2 size={20} className="mb-2 animate-spin" />Загружаем локальный каталог</div>;
   if (!entries.length) return <EmptyLibrary />;
@@ -191,7 +199,7 @@ const LexemeTable = React.memo(function LexemeTable({ entries, selectedId, onSel
       <div className={`grid h-10 items-center border-b border-line bg-panel-raised/25 px-5 text-[11px] font-medium uppercase text-muted-foreground ${obsidianEnabled ? "grid-cols-[minmax(105px,.75fr)_minmax(170px,1.45fr)_minmax(105px,.85fr)_112px_104px]" : "grid-cols-[minmax(110px,.8fr)_minmax(190px,1.5fr)_minmax(115px,.9fr)_118px]"}`}>
         <span>Лемма</span><span>Последний контекст</span><span>Книга</span><span>Обработка</span>{obsidianEnabled ? <span>Obsidian</span> : null}
       </div>
-      <div ref={containerRef} className="app-scrollbar h-[calc(100%-2.5rem)] overflow-y-auto">
+      <div ref={setContainerRef} className="app-scrollbar h-[calc(100%-2.5rem)] overflow-y-auto">
         {topHeight > 0 ? <div style={{ height: topHeight, gridColumn: "1 / -1" }} /> : null}
         {visibleEntries.map((entry) => (
           <LexemeRow key={entry.id} entry={entry} selected={entry.id === selectedId} onSelect={onSelect} obsidianEnabled={obsidianEnabled} />
@@ -209,11 +217,11 @@ const LexemeRow = React.memo(function LexemeRow({ entry, selected, onSelect, obs
       <div className="min-w-0 pr-3">
         <div className="flex items-center gap-2">
           <span className="truncate font-medium text-foreground">{entry.lemma}</span>
-          {entry.freshness === "new" ? <span className="rounded-[5px] bg-primary/12 px-1.5 py-0.5 text-[10px] font-medium text-primary">Новое</span> : null}
+          {isAcceptedNew(entry) ? <span className="rounded-[5px] bg-primary/12 px-1.5 py-0.5 text-[10px] font-medium text-primary">Новое</span> : null}
         </div>
         <div className="mt-0.5 flex items-center gap-1.5 overflow-hidden whitespace-nowrap text-[10px] text-muted-foreground">
           {entry.sources.kindle ? <BookOpen size={11} aria-label="Kindle" /> : null}
-          {entry.sources.obsidian ? <Database size={11} className="text-purple-300" aria-label="Obsidian" /> : null}
+          {entry.destinations.obsidian.state === "synced" ? <Database size={11} className="text-purple-300" aria-label="Obsidian" /> : null}
           {entry.forms.length > 1 ? <span>{entry.forms.length} формы</span> : null}
           {entry.occurrences.length > 1 ? <span>· {entry.occurrences.length} контекста</span> : null}
         </div>
@@ -233,7 +241,9 @@ function ProcessingMark({ entry }: { entry: LexemeRecord }) {
 
 function ObsidianMark({ entry }: { entry: LexemeRecord }) {
   const synced = entry.destinations.obsidian.state === "synced";
-  return <span className={`flex items-center gap-1.5 text-xs ${synced ? "text-purple-300" : "text-muted-foreground"}`} title={obsidianSyncReason(entry)}>{synced ? <Check size={12} /> : <Circle size={11} />}{synced ? "В Obsidian" : "Не в Obsidian"}</span>;
+  const missing = entry.destinations.obsidian.eligible && entry.destinations.obsidian.state === "missing";
+  const label = synced ? "В Obsidian" : missing ? "Не в Obsidian" : "Не отправляется";
+  return <span className={`flex items-center gap-1.5 text-xs ${synced ? "text-purple-300" : "text-muted-foreground"}`} title={obsidianSyncReason(entry)}>{synced ? <Check size={12} /> : <Circle size={11} />}{label}</span>;
 }
 
 function LexemeInspector({ entry, obsidianEnabled }: { entry: LexemeRecord | null; obsidianEnabled: boolean }) {
@@ -245,13 +255,13 @@ function LexemeInspector({ entry, obsidianEnabled }: { entry: LexemeRecord | nul
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="truncate text-[23px] font-semibold leading-7">{entry.lemma}</h2>
-            {entry.freshness === "new" ? <Badge>Новое</Badge> : null}
+            {isAcceptedNew(entry) ? <Badge>Новое</Badge> : null}
           </div>
           <p className="mt-1 truncate text-xs text-muted-foreground">{entry.forms.join(" · ")}</p>
         </div>
         <div className="flex items-center gap-1.5 text-muted-foreground">
           {entry.sources.kindle ? <span title="Есть в Kindle"><BookOpen size={15} /></span> : null}
-          {entry.sources.obsidian ? <Database size={15} className="text-purple-300" aria-label="Есть в Obsidian" /> : null}
+          {entry.destinations.obsidian.state === "synced" ? <Database size={15} className="text-purple-300" aria-label="Есть в Obsidian" /> : null}
         </div>
       </div>
 
@@ -274,7 +284,7 @@ function LexemeInspector({ entry, obsidianEnabled }: { entry: LexemeRecord | nul
             <article key={occurrence.id} className="border-l-2 border-line pl-3">
               <p className="text-sm leading-6 text-foreground/90">{occurrence.context || "Контекст отсутствует"}</p>
               <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-                {occurrence.source === "obsidian" ? <Database size={11} className="text-purple-300" /> : <BookOpen size={11} />}
+                <BookOpen size={11} />
                 <span>{occurrence.book_title || "Источник без названия"}</span>
                 {occurrence.authors ? <span>· {occurrence.authors}</span> : null}
                 {occurrence.looked_up_at ? <span>· {occurrence.looked_up_at}</span> : null}

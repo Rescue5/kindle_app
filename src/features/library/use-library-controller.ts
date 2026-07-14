@@ -1,6 +1,13 @@
 import * as React from "react";
 import { callBackend, cancelBackend, defaultSettings, listenProgress } from "@/lib/backend";
-import { filterLexemes, idleOperation, processable, type QuickFilter } from "./domain";
+import {
+  filterLexemes,
+  idleOperation,
+  kindleSignature,
+  KINDLE_PROBE_INTERVAL_MS,
+  shouldAutoSyncKindle,
+  type QuickFilter,
+} from "./domain";
 import type {
   AppSettings,
   BookOption,
@@ -9,6 +16,7 @@ import type {
   LibraryResult,
   Operation,
   ProgressEvent,
+  QueueStatus,
 } from "@/types";
 
 const unknownConnectors: ConnectorStatus = {
@@ -22,13 +30,18 @@ type ProcessingResult = {
   rejected_new: number;
   skipped_existing: number;
   entries: LexemeRecord[];
+  queue_status: QueueStatus;
+  message?: string;
 };
 
 type ObsidianResult = {
   added: number;
   skipped: number;
   entries: LexemeRecord[];
+  queue_status: QueueStatus;
 };
+
+const emptyQueue: QueueStatus = { pending: 0, processing: 0, failed: 0, total: 0 };
 
 function jobId() {
   return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `job-${Date.now()}`;
@@ -55,9 +68,18 @@ export function useLibraryController() {
   const [quickFilter, setQuickFilter] = React.useState<QuickFilter>("all");
   const [selectedId, setSelectedId] = React.useState("");
   const [operation, setOperation] = React.useState<Operation>(idleOperation);
+  const [queueStatus, setQueueStatus] = React.useState<QueueStatus>(emptyQueue);
   const [loading, setLoading] = React.useState(true);
   const operationRef = React.useRef(operation);
   operationRef.current = operation;
+  const prevConnectorsRef = React.useRef<ConnectorStatus>(unknownConnectors);
+  const lastAutoSyncSignatureRef = React.useRef<string | null>(null);
+  const lastAutoSyncAttemptAtRef = React.useRef(0);
+  const probeInFlightRef = React.useRef(false);
+  const autoSyncInFlightRef = React.useRef(false);
+  const processingInFlightRef = React.useRef(false);
+  const syncKindleRef = React.useRef(syncKindlePlaceholder);
+  function syncKindlePlaceholder() { return Promise.resolve(); }
 
   const selectedBook = React.useMemo(
     () => books.find((book) => book.key === selectedBookKey) ?? books[0],
@@ -87,6 +109,7 @@ export function useLibraryController() {
       kindle: result.connectors?.kindle?.state === "unknown" ? current.kindle : (result.connectors?.kindle ?? current.kindle),
       obsidian: result.connectors?.obsidian ?? current.obsidian,
     }));
+    setQueueStatus(result.queueStatus ?? emptyQueue);
   }, []);
 
   const loadLibrary = React.useCallback(async () => {
@@ -137,19 +160,41 @@ export function useLibraryController() {
   const lastProbedAt = React.useRef(0);
   const probeConnectors = React.useCallback(async (force = false) => {
     if (document.visibilityState !== "visible") return;
-    if (!force && Date.now() - lastProbedAt.current < 30000) return;
-    lastProbedAt.current = Date.now();
+    const now = Date.now();
+    if (!force && now - lastProbedAt.current < KINDLE_PROBE_INTERVAL_MS) return;
+    if (probeInFlightRef.current) return;
+    probeInFlightRef.current = true;
+    lastProbedAt.current = now;
+    const previous = prevConnectorsRef.current;
     try {
       const status = await callBackend<ConnectorStatus>("connector_status", {});
+      prevConnectorsRef.current = status;
       setConnectors(status);
+      const kindle = status.kindle;
+      const shouldSync = shouldAutoSyncKindle({
+        previous: previous.kindle,
+        current: kindle,
+        lastSyncedSignature: lastAutoSyncSignatureRef.current,
+        lastAttemptAt: lastAutoSyncAttemptAtRef.current,
+        now,
+      });
+      if (shouldSync && operationRef.current.status !== "running" && !autoSyncInFlightRef.current) {
+        lastAutoSyncAttemptAtRef.current = now;
+        autoSyncInFlightRef.current = true;
+        void syncKindleRef.current().finally(() => {
+          autoSyncInFlightRef.current = false;
+        });
+      }
     } catch {
       setConnectors((current) => ({ ...current, kindle: { ...current.kindle, state: "error", checked_at: new Date().toISOString() } }));
+    } finally {
+      probeInFlightRef.current = false;
     }
   }, []);
 
   React.useEffect(() => {
     void probeConnectors();
-    const interval = window.setInterval(() => void probeConnectors(), 30000);
+    const interval = window.setInterval(() => void probeConnectors(), KINDLE_PROBE_INTERVAL_MS);
     const onVisibility = () => {
       if (document.visibilityState === "visible") void probeConnectors();
     };
@@ -185,41 +230,67 @@ export function useLibraryController() {
   }, []);
 
   const syncKindle = React.useCallback(async () => {
+    lastAutoSyncAttemptAtRef.current = Date.now();
     const id = begin("kindle", "Синхронизация Kindle", "Проверяем подключение устройства");
     try {
       const result = await callBackend<LibraryResult>("sync_kindle", { job_id: id });
       applyLibrary(result);
       const connected = result.connectors.kindle.state === "connected";
-      setOperation((current) => ({ ...current, status: connected ? "completed" : "error", title: connected ? "Kindle синхронизирован" : "Kindle не подключён", message: connected ? `В библиотеке ${result.entries.length} лемм` : "Локальная библиотека сохранена; подключите Kindle по USB", error: connected ? "" : "Устройство не найдено" }));
+      const signature = kindleSignature(result.connectors.kindle);
+      if (connected && signature) {
+        lastAutoSyncSignatureRef.current = signature;
+      }
+      setOperation((current) => ({
+        ...current,
+        status: connected ? "completed" : "error",
+        stage: connected ? "completed" : "failed",
+        title: connected ? "Kindle синхронизирован" : "Kindle не подключён",
+        message: connected ? `В библиотеке ${result.entries.length} лемм` : "Локальная библиотека сохранена; подключите Kindle по USB",
+        error: connected ? "" : "Устройство не найдено",
+      }));
     } catch (error) {
       fail(id, "Синхронизация Kindle остановлена", error);
     } finally {
       void probeConnectors(true);
     }
   }, [applyLibrary, begin, fail, probeConnectors]);
+  syncKindleRef.current = syncKindle;
 
-  const processVisible = React.useCallback(async () => {
-    const candidates = processable(visibleEntries);
-    if (!candidates.length) return;
-    const ids = new Set(candidates.map((entry) => entry.id));
-    setEntries((current) => current.map((entry) => (ids.has(entry.id) ? { ...entry, processing: { ...entry.processing, state: "processing", error: "" } } : entry)));
-    const id = begin("processing", "Offline-обработка", `В очереди ${candidates.length} лемм`);
+  const processQueue = React.useCallback(async () => {
+    if (processingInFlightRef.current) return;
+    processingInFlightRef.current = true;
+    const queueSize = queueStatus.pending + queueStatus.failed;
+    const id = begin("processing", "Offline-обработка", `В очереди ${queueSize} лемм`);
     try {
-      const result = await callBackend<ProcessingResult>("process_lexemes", { job_id: id, ids: Array.from(ids) });
+      const result = await callBackend<ProcessingResult>("process_queue", { job_id: id });
       setEntries(result.entries);
-      setOperation((current) => ({ ...current, status: "completed", stage: "completed", title: "Обработка завершена", message: `Обработано: ${result.processed_new}; принято: ${result.accepted_new}; отклонено: ${result.rejected_new}`, current: candidates.length, total: candidates.length }));
+      setQueueStatus(result.queue_status ?? emptyQueue);
+      const skipped = result.skipped_existing ?? 0;
+      const defaultMessage = skipped > 0
+        ? `Обработано: ${result.processed_new}; принято: ${result.accepted_new}; отклонено: ${result.rejected_new}; пропущено ранее: ${skipped}`
+        : `Обработано: ${result.processed_new}; принято: ${result.accepted_new}; отклонено: ${result.rejected_new}`;
+      setOperation((current) => ({ ...current, status: "completed", stage: "completed", title: "Обработка завершена", message: result.message || defaultMessage, current: queueSize, total: queueSize }));
     } catch (error) {
-      const wasCancelled = String(error).toLocaleLowerCase("ru").includes("отменена");
-      setEntries((current) => current.map((entry) => (ids.has(entry.id) && entry.processing.state === "processing" ? { ...entry, processing: { ...entry.processing, state: wasCancelled ? "pending" : "failed", error: wasCancelled ? "" : String(error) } } : entry)));
+      void loadLibrary();
       fail(id, "Offline-обработка остановлена", error);
+    } finally {
+      processingInFlightRef.current = false;
     }
-  }, [begin, fail, visibleEntries]);
+  }, [begin, fail, loadLibrary, queueStatus.failed, queueStatus.pending]);
+
+  React.useEffect(() => {
+    const pending = queueStatus.pending + queueStatus.failed;
+    if (loading || pending === 0 || processingInFlightRef.current) return;
+    if (["running", "error", "cancelled"].includes(operation.status)) return;
+    void processQueue();
+  }, [loading, operation.status, processQueue, queueStatus.failed, queueStatus.pending]);
 
   const syncObsidian = React.useCallback(async () => {
     const id = begin("obsidian", "Синхронизация Obsidian", "Сверяем глобальную очередь карточек");
     try {
       const result = await callBackend<ObsidianResult>("sync_obsidian", { job_id: id });
       setEntries(result.entries);
+      setQueueStatus(result.queue_status ?? emptyQueue);
       setOperation((current) => ({ ...current, status: "completed", stage: "completed", title: "Obsidian синхронизирован", message: `Добавлено: ${result.added}; без изменений или заблокировано: ${result.skipped}` }));
     } catch (error) {
       fail(id, "Синхронизация Obsidian остановлена", error);
@@ -249,10 +320,10 @@ export function useLibraryController() {
   const retry = React.useCallback(() => {
     const kind = operationRef.current.kind;
     if (kind === "kindle") return void syncKindle();
-    if (kind === "processing") return void processVisible();
+    if (kind === "processing") return void processQueue();
     if (kind === "obsidian") return void syncObsidian();
     if (kind === "export") return void exportVisible(settings.default_export_format);
-  }, [exportVisible, processVisible, settings.default_export_format, syncKindle, syncObsidian]);
+  }, [exportVisible, processQueue, settings.default_export_format, syncKindle, syncObsidian]);
 
   const dismissOperation = React.useCallback(() => setOperation(idleOperation), []);
 
@@ -274,9 +345,9 @@ export function useLibraryController() {
       visibleEntries,
       selectedEntry,
       operation,
+      queueStatus,
       loading,
       syncKindle,
-      processVisible,
       syncObsidian,
       exportVisible,
       cancel,
@@ -301,9 +372,9 @@ export function useLibraryController() {
       visibleEntries,
       selectedEntry,
       operation,
+      queueStatus,
       loading,
       syncKindle,
-      processVisible,
       syncObsidian,
       exportVisible,
       cancel,

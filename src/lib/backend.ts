@@ -86,25 +86,38 @@ function analysis(lemma: string, score: number): WordAnalysis {
 
 function makeLexeme(index: number): LexemeRecord {
   const [word, lemma] = baseWords[index];
-  const ready = index === 0 || index >= 4;
+  const rejected = index === 5;
+  const ready = index === 0 || index === 4;
   const inObsidian = index === 0 || index === 4;
+  const localAnalysis = ready
+    ? analysis(lemma, index === 0 ? 10 : 7)
+    : rejected
+      ? { ...analysis(lemma, 1), accepted: false, importance_note: "Отклонено локальными правилами." }
+      : null;
   return {
     id: `lexeme-${lemma}`,
     lemma,
     display_form: word,
     language: "en",
     forms: word === lemma ? [word] : [word, lemma],
-    occurrences: [occurrence(index), ...(inObsidian ? [occurrence(index, "obsidian")] : [])],
+    occurrences: [occurrence(index)],
     freshness: index === 1 || index === 2 ? "new" : "known",
     processing: {
-      state: ready ? "ready" : "pending",
-      analysis: ready ? analysis(lemma, index === 0 ? 10 : 7) : null,
-      updated_at: ready ? "2026-07-10T10:00:00Z" : "",
+      state: rejected ? "rejected" : ready ? "ready" : "pending",
+      analysis: localAnalysis,
+      updated_at: ready || rejected ? "2026-07-10T10:00:00Z" : "",
       error: "",
     },
-    sources: { kindle: true, obsidian: inObsidian, legacy: false },
+    sources: { kindle: true, legacy: false },
     destinations: {
-      obsidian: { state: inObsidian ? "synced" : "not_synced", reason: ready ? "" : "waiting_processing", last_synced_at: inObsidian ? "2026-07-10T10:00:00Z" : "" },
+      obsidian: {
+        state: inObsidian ? "synced" : ready ? "missing" : "not_applicable",
+        eligible: ready,
+        reason: ready ? "" : rejected ? "rejected" : "waiting_processing",
+        external_key: lemma,
+        last_checked_at: "2026-07-10T10:00:00Z",
+        last_synced_at: inObsidian ? "2026-07-10T10:00:00Z" : "",
+      },
       anki: { state: "not_exported", last_exported_at: "" },
       quizlet: { state: "not_exported", last_exported_at: "" },
     },
@@ -125,6 +138,7 @@ function mockConnectors(): ConnectorStatus {
       state: scenario === "disconnected" ? "disconnected" : "connected",
       label: scenario === "disconnected" ? "Kindle" : "Kindle Paperwhite",
       checked_at: new Date().toISOString(),
+      signature: scenario === "disconnected" ? undefined : ["preview-kindle", "12345678", "2026-07-10T10:00:00Z"],
     },
     obsidian: {
       state: scenario === "obsidian-error" ? "error" : "connected",
@@ -145,6 +159,7 @@ function buildBooks(entries: LexemeRecord[]): BookOption[] {
 }
 
 function libraryResult(): LibraryResult {
+  const pending = mockEntries.filter((entry) => ["pending", "failed"].includes(entry.processing.state)).length;
   return {
     sourceName: "Preview library",
     sourceStatus: "Локальная библиотека готова",
@@ -152,15 +167,16 @@ function libraryResult(): LibraryResult {
     entries: mockEntries,
     last_kindle_sync_id: "preview-sync",
     connectors: mockConnectors(),
+    queueStatus: { pending, processing: 0, failed: 0, total: pending },
   };
 }
 
 async function mockBackend<T>(action: string, payload: unknown): Promise<T> {
-  const slowOperation = previewScenario() === "slow" && ["process_lexemes", "sync_obsidian"].includes(action);
+  const slowOperation = previewScenario() === "slow" && ["process_queue", "process_lexemes", "sync_obsidian"].includes(action);
   await new Promise((resolve) => setTimeout(resolve, action === "connector_status" ? 80 : slowOperation ? 2500 : 280));
   const requestJobId = (payload as { job_id?: string } | undefined)?.job_id;
   if (requestJobId && cancelledJobs.delete(requestJobId)) throw new Error("Операция отменена");
-  if (previewScenario() === "operation-error" && action === "process_lexemes" && !mockFailureConsumed) {
+  if (previewScenario() === "operation-error" && action === "process_queue" && !mockFailureConsumed) {
     mockFailureConsumed = true;
     throw new Error("Тестовая ошибка offline-обработки");
   }
@@ -168,24 +184,32 @@ async function mockBackend<T>(action: string, payload: unknown): Promise<T> {
   if (action === "save_settings") return { saved: true } as T;
   if (action === "connector_status") return mockConnectors() as T;
   if (["load_library", "load_cached", "sync_kindle", "scan"].includes(action)) return libraryResult() as T;
-  if (["process_lexemes", "optimize"].includes(action)) {
-    const ids = new Set((payload as { ids?: string[] })?.ids ?? []);
+  if (["process_queue", "process_lexemes", "optimize"].includes(action)) {
+    const requested = (payload as { ids?: string[] })?.ids;
+    const ids = new Set(requested ?? mockEntries.filter((entry) => ["pending", "failed"].includes(entry.processing.state)).map((entry) => entry.id));
     mockEntries = mockEntries.map((entry) =>
       ids.has(entry.id)
-        ? { ...entry, processing: { state: "ready", analysis: analysis(entry.lemma, 6), updated_at: new Date().toISOString(), error: "" } }
+        ? {
+            ...entry,
+            processing: { state: "ready", analysis: analysis(entry.lemma, 6), updated_at: new Date().toISOString(), error: "" },
+            destinations: {
+              ...entry.destinations,
+              obsidian: { ...entry.destinations.obsidian, state: "missing", eligible: true, reason: "" },
+            },
+          }
         : entry,
     );
-    return { processed_new: ids.size, accepted_new: ids.size, rejected_new: 0, skipped_existing: 0, entries: mockEntries } as T;
+    return { processed_new: ids.size, accepted_new: ids.size, rejected_new: 0, skipped_existing: 0, entries: mockEntries, queue_status: { pending: 0, processing: 0, failed: 0, total: 0 } } as T;
   }
   if (action === "sync_obsidian") {
-    const pendingSync = mockEntries.filter((entry) => entry.destinations.obsidian.state !== "synced");
-    const items = pendingSync.map((entry) => ({ id: entry.id, outcome: entry.processing.state === "ready" ? "added" : "blocked", reason: entry.processing.state === "ready" ? "" : "waiting_processing" }));
+    const pendingSync = mockEntries.filter((entry) => entry.destinations.obsidian.eligible && entry.destinations.obsidian.state === "missing");
+    const items = pendingSync.map((entry) => ({ id: entry.id, outcome: "added", reason: "" }));
     mockEntries = mockEntries.map((entry) =>
-      entry.processing.state === "ready"
-        ? { ...entry, sources: { ...entry.sources, obsidian: true }, destinations: { ...entry.destinations, obsidian: { state: "synced", reason: "", last_synced_at: new Date().toISOString() } } }
+      entry.destinations.obsidian.eligible
+        ? { ...entry, destinations: { ...entry.destinations, obsidian: { ...entry.destinations.obsidian, state: "synced", reason: "", last_synced_at: new Date().toISOString() } } }
         : entry,
     );
-    return { added: items.filter((item) => item.outcome === "added").length, skipped: items.filter((item) => item.outcome !== "added").length, files: ["Priority 7.md"], backup_path: "preview", items, entries: mockEntries } as T;
+    return { added: items.length, skipped: 0, files: ["Priority 7.md"], backup_path: "preview", items, entries: mockEntries, queue_status: { pending: 0, processing: 0, failed: 0, total: 0 } } as T;
   }
   if (action === "export") return { path: "preview/export.tsv", exported: (payload as { entries?: unknown[] })?.entries?.length ?? 0 } as T;
   return {} as T;

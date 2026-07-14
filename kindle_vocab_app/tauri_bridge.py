@@ -12,11 +12,11 @@ from typing import Any
 
 from kindle_vocab_app import obsidian_sync, settings, vocab_cache
 from kindle_vocab_app.kindle_db import fetch_entries, list_books, validate_vocab_db
-from kindle_vocab_app.kindle_device import find_kindle_source
+from kindle_vocab_app.kindle_device import find_kindle_presence, find_kindle_source
+from kindle_vocab_app.library_repository import repository_for
 from kindle_vocab_app.logging_config import configure_logging, get_logger
-from kindle_vocab_app.processing_state import ProcessedSnapshot
 from kindle_vocab_app.tsv_schema import OPTIMIZED_TSV_HEADER
-from kindle_vocab_app.vocab_optimizer import optimize_entries, _candidate_from_entry
+from kindle_vocab_app.vocab_optimizer import analyze_entries_once, _candidate_from_entry
 
 
 logger = get_logger(__name__)
@@ -47,7 +47,11 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
 
     if action in {"load_library", "load_cached"}:
         catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
-        return _catalog_response(catalog, connector_status=_connector_status(workspace, probe_kindle=False))
+        return _catalog_response(
+            catalog,
+            connector_status=_connector_status(workspace, probe_kindle=False),
+            queue_status=repository_for(workspace).queue_status(),
+        )
 
     if action == "connector_status":
         return _connector_status(workspace, probe_kindle=True)
@@ -60,7 +64,11 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
             logger.info("Kindle synchronization skipped job_id=%s reason=disconnected", job_id)
             disconnected = _connector_status(workspace, probe_kindle=False)
             disconnected["kindle"] = {"state": "disconnected", "label": "Kindle", "checked_at": vocab_cache.utc_now()}
-            return _catalog_response(catalog, connector_status=disconnected)
+            return _catalog_response(
+                catalog,
+                connector_status=disconnected,
+                queue_status=repository_for(workspace).queue_status(),
+            )
         _emit_progress(job_id, "copying", "Копируем vocab.db в локальный кэш", 1, 4)
         db_path = source.copy_to_cache(workspace / ".app-data" / "cache")
         validate_vocab_db(db_path)
@@ -70,7 +78,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         _emit_progress(job_id, "merging", "Объединяем формы и известные леммы", 3, 4)
         catalog = vocab_cache.merge_kindle(catalog, entries, sync_id=sync_id, mark_new=True)
         _refresh_obsidian_destination_states(catalog)
-        vocab_cache.save(workspace, catalog)
+        repository_for(workspace).save_catalog(catalog)
         _emit_progress(job_id, "completed", "Синхронизация Kindle завершена", 4, 4)
         logger.info(
             "Kindle synchronization completed job_id=%s sync_id=%s entries=%d lexemes=%d",
@@ -79,20 +87,30 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
             len(entries),
             len(catalog["lexemes"]),
         )
+        connector_status = _connector_status(workspace, probe_kindle=True)
+        if connector_status["kindle"]["state"] != "connected":
+            connector_status["kindle"] = {
+                "state": "connected",
+                "label": source.label,
+                "checked_at": vocab_cache.utc_now(),
+            }
         return _catalog_response(
             catalog,
             source_name=source.label,
             source_status="Vocabulary Builder синхронизирован",
-            connector_status={
-                **_connector_status(workspace, probe_kindle=False),
-                "kindle": {"state": "connected", "label": source.label, "checked_at": vocab_cache.utc_now()},
-            },
+            connector_status=connector_status,
+            queue_status=repository_for(workspace).queue_status(),
         )
 
     if action == "load_demo":
         raw = demo_state()["entries"]
         catalog = vocab_cache.merge_kindle(vocab_cache.empty_catalog(), raw, sync_id="demo", mark_new=True)
-        return _catalog_response(catalog, source_name="Demo Kindle", source_status="Демонстрационные данные")
+        return _catalog_response(
+            catalog,
+            source_name="Demo Kindle",
+            source_status="Демонстрационные данные",
+            queue_status={"pending": len(catalog["lexemes"]), "processing": 0, "failed": 0, "total": len(catalog["lexemes"])},
+        )
 
     if action == "export":
         entries = [_lexeme_as_entry(item) for item in payload.get("entries") or []]
@@ -105,133 +123,27 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         for lexeme in catalog["lexemes"]:
             if lexeme.get("id") in exported_ids:
                 lexeme["destinations"][export_format] = {"state": "exported", "last_exported_at": now}
-        vocab_cache.save(workspace, catalog)
+        repository_for(workspace).save_catalog(catalog)
         return {"path": str(output), "exported": exported}
 
-    if action in {"process_lexemes", "optimize"}:
-        catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
-        requested_ids = {str(value) for value in payload.get("ids") or []}
-        if not requested_ids and payload.get("entries"):
-            requested_ids = {str(item.get("id") or "") for item in payload.get("entries") or []}
-        selected = [
-            item
-            for item in catalog["lexemes"]
-            if item.get("id") in requested_ids and (item.get("processing") or {}).get("state") in {"pending", "failed"}
-        ]
-        entries = [_lexeme_as_entry(item) for item in selected]
-        candidate_keys_by_id: dict[str, str] = {}
-        for entry in entries:
-            candidate = _candidate_from_entry(entry)
-            if candidate is None:
-                continue
-            candidate_keys_by_id[str(entry.get("id") or "")] = vocab_cache.normalize_lemma(
-                str(candidate["lexical_key"])
-            )
-        _emit_progress(job_id, "preparing", f"Подготовлено лемм: {len(entries)}", 0, max(len(entries), 1))
-        output_dir = workspace / ".app-data" / "optimized"
-        result = optimize_entries(
-            entries,
-            output_dir,
-            output_dir / "processed_snapshot.json",
-            progress_callback=lambda current, total, lemma: _emit_progress(
-                job_id,
-                "processing",
-                f"Анализируем {lemma}",
-                current,
-                max(total, 1),
-            ),
+    if action in {"process_queue", "process_lexemes", "optimize"}:
+        repository = repository_for(workspace)
+        catalog = repository.load_catalog()
+        requested_ids: set[str] | None = None
+        if action != "process_queue":
+            requested_ids = {str(value) for value in payload.get("ids") or []}
+            if not requested_ids and payload.get("entries"):
+                requested_ids = {
+                    str(item.get("id") or "") for item in payload.get("entries") or []
+                }
+        queued_ids = repository.queued_ids(requested_ids)
+        return _process_queued_lexemes(
+            catalog,
+            queued_ids,
+            repository,
+            workspace,
+            job_id=job_id,
         )
-        analyses, analyses_by_id = _analysis_by_lemma(result.analysis_dir)
-        snapshot = ProcessedSnapshot.load(result.snapshot_path)
-        rejected_without_candidate = 0
-        for index, lexeme in enumerate(selected, 1):
-            lemma_key = vocab_cache.normalize_lemma(str(lexeme.get("lemma") or ""))
-            forms = {vocab_cache.normalize_lemma(str(form)) for form in lexeme.get("forms") or []}
-            display_key = vocab_cache.normalize_lemma(str(lexeme.get("display_form") or ""))
-            lexeme_id = str(lexeme.get("id") or "")
-            candidate_key = candidate_keys_by_id.get(lexeme_id, "")
-            if not candidate_key:
-                rejected_without_candidate += 1
-                lexeme["processing"] = {
-                    "state": "rejected",
-                    "analysis": _analysis_for_unsupported_entry(lexeme),
-                    "updated_at": vocab_cache.utc_now(),
-                    "error": "",
-                }
-                lexeme["destinations"]["obsidian"].update(
-                    {"state": "not_synced", "reason": "unsupported_language"}
-                )
-                logger.info(
-                    "Rejected unsupported offline-processing entry job_id=%s lexeme_id=%s language=%s",
-                    job_id,
-                    lexeme_id,
-                    lexeme.get("language"),
-                )
-                continue
-            analysis = analyses.get(candidate_key) or analyses.get(lemma_key) or analyses_by_id.get(lexeme_id)
-            if analysis is None:
-                previous = (lexeme.get("processing") or {}).get("analysis")
-                if previous:
-                    analysis = previous
-            if analysis is None:
-                for key, candidate in analyses.items():
-                    if key in forms or key == display_key:
-                        analysis = candidate
-                        break
-            if analysis is None:
-                for key in {candidate_key, lemma_key, display_key, *forms}:
-                    if not key:
-                        continue
-                    if snapshot.has_processed(key):
-                        analysis = _analysis_from_snapshot(snapshot.processed[key])
-                        break
-            if analysis is None:
-                lexeme["processing"] = {
-                    "state": "failed",
-                    "analysis": None,
-                    "updated_at": vocab_cache.utc_now(),
-                    "error": "Не найден audit-файл offline-обработки",
-                }
-            else:
-                accepted = analysis.get("accepted") is not False
-                lexeme["processing"] = {
-                    "state": "ready" if accepted else "rejected",
-                    "analysis": analysis,
-                    "updated_at": str(analysis.get("processed_at") or vocab_cache.utc_now()),
-                    "error": "",
-                }
-                lexeme["lemma"] = vocab_cache.normalize_lemma(str(analysis.get("base_form") or lexeme["lemma"]))
-                if not accepted:
-                    lexeme["destinations"]["obsidian"].update(
-                        {"state": "not_synced", "reason": "rejected"}
-                    )
-            logger.debug(
-                "Applied processing result job_id=%s lexeme_id=%s index=%d total=%d state=%s",
-                job_id,
-                lexeme.get("id"),
-                index,
-                len(selected),
-                lexeme["processing"]["state"],
-            )
-        _refresh_obsidian_destination_states(catalog)
-        vocab_cache.save(workspace, catalog)
-        _emit_progress(job_id, "completed", "Offline-обработка завершена", len(selected), max(len(selected), 1))
-        return {
-            "processed_new": result.processed_new,
-            "accepted_new": result.accepted_new,
-            "skipped_existing": result.skipped_existing,
-            "rejected_new": result.rejected_new + rejected_without_candidate,
-            "tsv_path": str(result.tsv_path),
-            "entries": catalog["lexemes"],
-            "events": [
-                {
-                    "phase": "answered",
-                    "title": "Offline optimizer",
-                    "message": f"Processed {result.processed_new}; accepted {result.accepted_new}; rejected {result.rejected_new}; skipped {result.skipped_existing}.",
-                    "meta": "Python",
-                }
-            ],
-        }
 
     if action == "load_settings":
         app_settings = settings.load(workspace)
@@ -243,16 +155,23 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         return {"saved": True}
 
     if action == "load_obsidian":
-        vault_path = str(payload.get("vault_path") or "")
-        cards_path = str(payload.get("cards_path") or "")
+        app_settings = settings.load(workspace)
+        vault_path = str(payload.get("vault_path") or app_settings.obsidian_vault_path)
+        cards_path = str(payload.get("cards_path") or app_settings.obsidian_cards_path)
         if not vault_path or not cards_path:
             raise ValueError("vault_path and cards_path are required")
         cards_dir = Path(vault_path) / cards_path
+        repository = repository_for(workspace)
         catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
-        entries = obsidian_sync.read_cards(cards_dir)
-        catalog = vocab_cache.merge_obsidian(catalog, entries)
-        vocab_cache.save(workspace, catalog)
-        return _catalog_response(catalog, source_name="Obsidian", source_status=f"Сверено карточек: {len(entries)}")
+        card_count = _reconcile_obsidian(catalog, cards_dir)
+        repository.save_catalog(catalog)
+        return _catalog_response(
+            catalog,
+            source_name="Obsidian",
+            source_status=f"Сверено карточек: {card_count}",
+            connector_status=_connector_status(workspace, probe_kindle=False),
+            queue_status=repository.queue_status(),
+        )
 
     if action == "sync_obsidian":
         app_settings = settings.load(workspace)
@@ -261,35 +180,177 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         backup_enabled = bool(payload.get("backup_enabled", app_settings.obsidian_backup_enabled))
         if not vault_path or not cards_path:
             raise ValueError("vault_path and cards_path are required")
+        repository = repository_for(workspace)
         catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
-        entries = [_lexeme_as_entry(item) for item in catalog["lexemes"] if (item.get("destinations") or {}).get("obsidian", {}).get("state") != "synced"]
         cards_dir = Path(vault_path) / cards_path
         backups_dir = workspace / ".app-data" / "obsidian-backups"
+        before_count = _reconcile_obsidian(catalog, cards_dir)
+        entries = [
+            _lexeme_as_entry(item)
+            for item in catalog["lexemes"]
+            if (item.get("destinations") or {}).get("obsidian", {}).get("eligible")
+            and (item.get("destinations") or {}).get("obsidian", {}).get("state") == "missing"
+        ]
         _emit_progress(job_id, "reconciling", f"Проверяем очередь: {len(entries)}", 0, max(len(entries), 1))
         result = obsidian_sync.append_cards(
             cards_dir, entries, backups_dir, backup_enabled=backup_enabled
         )
-        result_by_id = {str(item.get("id") or ""): item for item in result.get("items") or []}
+        after_count = _reconcile_obsidian(catalog, cards_dir)
+        if after_count - before_count != int(result.get("added") or 0):
+            raise RuntimeError("Проверка Obsidian не подтвердила количество добавленных карточек")
+        failed_by_id = {
+            str(item.get("id") or ""): item
+            for item in result.get("items") or []
+            if item.get("outcome") == "failed"
+        }
         for index, lexeme in enumerate(catalog["lexemes"], 1):
-            item = result_by_id.get(str(lexeme.get("id") or ""))
-            if item is None:
-                continue
-            outcome = item.get("outcome")
-            destination = lexeme["destinations"]["obsidian"]
-            if outcome in {"added", "already_present"}:
-                destination.update({"state": "synced", "reason": "", "last_synced_at": vocab_cache.utc_now()})
-                lexeme["sources"]["obsidian"] = True
-            elif outcome == "failed":
-                destination.update({"state": "failed", "reason": item.get("reason") or "sync_failed"})
-            else:
-                destination.update({"state": "not_synced", "reason": item.get("reason") or "waiting_processing"})
+            failed = failed_by_id.get(str(lexeme.get("id") or ""))
+            if failed:
+                lexeme["destinations"]["obsidian"].update(
+                    {"state": "failed", "reason": failed.get("reason") or "sync_failed"}
+                )
             _emit_progress(job_id, "syncing", f"Проверено {index} из {len(catalog['lexemes'])}", index, len(catalog["lexemes"]), lexeme_id=str(lexeme.get("id") or ""))
-        vocab_cache.save(workspace, catalog)
+        repository.save_catalog(catalog)
+        repository.record_sync_run(
+            "obsidian",
+            "completed",
+            added=int(result.get("added") or 0),
+            skipped=int(result.get("skipped") or 0),
+        )
         result["entries"] = catalog["lexemes"]
+        result["queue_status"] = repository.queue_status()
         _emit_progress(job_id, "completed", "Синхронизация Obsidian завершена", len(entries), max(len(entries), 1))
         return result
 
     raise ValueError(f"Unsupported bridge action: {action}")
+
+
+def _process_queued_lexemes(
+    catalog: dict[str, Any],
+    queued_ids: list[str],
+    repository: Any,
+    workspace: Path,
+    *,
+    job_id: str,
+) -> dict[str, Any]:
+    total = len(queued_ids)
+    output_dir = workspace / ".app-data" / "optimized"
+    accepted_new = 0
+    rejected_new = 0
+    processed_new = 0
+    skipped_existing = 0
+    _emit_progress(job_id, "preparing", f"В очереди лемм: {total}", 0, max(total, 1))
+
+    for index, queued_id in enumerate(queued_ids, 1):
+        lexeme = next(
+            (item for item in catalog["lexemes"] if str(item.get("id") or "") == queued_id),
+            None,
+        )
+        if lexeme is None or (lexeme.get("processing") or {}).get("state") not in {
+            "pending",
+            "failed",
+        }:
+            skipped_existing += 1
+            continue
+        entry = _lexeme_as_entry(lexeme)
+        candidate = _candidate_from_entry(entry)
+        try:
+            if candidate is None:
+                analysis = _analysis_for_unsupported_entry(lexeme)
+            else:
+                audit_rows = analyze_entries_once([entry], output_dir)
+                if not audit_rows:
+                    raise RuntimeError("Offline-анализ не вернул результат")
+                analysis = _analysis_from_audit(audit_rows[0])
+
+            accepted = analysis.get("accepted") is not False
+            lexeme["processing"] = {
+                "state": "ready" if accepted else "rejected",
+                "analysis": analysis,
+                "updated_at": str(analysis.get("processed_at") or vocab_cache.utc_now()),
+                "error": "",
+                "origin": "sqlite_optimizer",
+            }
+            lexeme["lemma"] = vocab_cache.normalize_lemma(
+                str(analysis.get("base_form") or lexeme.get("lemma") or "")
+            )
+            processed_new += 1
+            if accepted:
+                accepted_new += 1
+            else:
+                rejected_new += 1
+            _refresh_obsidian_destination_states(catalog)
+            if repository.save_processed_lexeme(catalog, queued_id):
+                catalog = repository.load_catalog()
+        except Exception as exc:
+            lexeme["processing"] = {
+                "state": "failed",
+                "analysis": None,
+                "updated_at": vocab_cache.utc_now(),
+                "error": str(exc),
+                "origin": "sqlite_optimizer",
+            }
+            _refresh_obsidian_destination_states(catalog)
+            repository.save_processed_lexeme(catalog, queued_id)
+            raise
+
+        _emit_progress(
+            job_id,
+            "processing",
+            f"Обработано {index} из {total}",
+            index,
+            max(total, 1),
+            lexeme_id=queued_id,
+        )
+
+    _emit_progress(job_id, "completed", "Offline-обработка завершена", total, max(total, 1))
+    message = (
+        f"Обработано: {processed_new}; принято: {accepted_new}; "
+        f"отклонено: {rejected_new}; пропущено ранее: {skipped_existing}."
+    )
+    return {
+        "processed_new": processed_new,
+        "accepted_new": accepted_new,
+        "skipped_existing": skipped_existing,
+        "rejected_new": rejected_new,
+        "tsv_path": str(output_dir / "optimized.tsv"),
+        "entries": catalog["lexemes"],
+        "queue_status": repository.queue_status(),
+        "message": message,
+        "events": [
+            {
+                "phase": "answered",
+                "title": "Offline optimizer",
+                "message": message,
+                "meta": "SQLite",
+            }
+        ],
+    }
+
+
+def _analysis_from_audit(raw: dict[str, Any]) -> dict[str, Any]:
+    importance = raw.get("importance") or {}
+    frequencies = raw.get("frequencies") or {}
+    wordnet = raw.get("wordnet") or {}
+    warnings = raw.get("warnings") or {}
+    return {
+        "base_form": str(raw.get("base_form") or raw.get("lexical_key") or ""),
+        "pos": str(raw.get("pos") or ""),
+        "accepted": bool(raw.get("accepted", True)),
+        "importance_score": importance.get("score"),
+        "importance_note": str(importance.get("explanation") or importance.get("note") or ""),
+        "frequency_note": _frequency_note(frequencies),
+        "lemma_zipf": frequencies.get("lemma_zipf"),
+        "form_zipf": frequencies.get("form_zipf"),
+        "wordnet_synset_count": wordnet.get("synset_count"),
+        "wordnet_pos_count": wordnet.get("pos_count"),
+        "warnings": sorted(warnings) if isinstance(warnings, dict) else list(warnings),
+        "tags": str(raw.get("tags") or ""),
+        "source_word_forms": list(raw.get("source_word_forms") or []),
+        "source_occurrence_count": raw.get("source_occurrence_count"),
+        "processed_at": str(raw.get("processed_at") or vocab_cache.utc_now()),
+        "translation_status": "offline_only",
+    }
 
 
 def _emit_progress(
@@ -317,7 +378,8 @@ def _emit_progress(
 
 
 def _load_catalog_with_sources(workspace: Path, *, reconcile_kindle: bool = True, reconcile_obsidian: bool = True) -> dict[str, Any]:
-    catalog = vocab_cache.load(workspace) or vocab_cache.empty_catalog()
+    repository = repository_for(workspace)
+    catalog = repository.load_catalog()
     if reconcile_kindle:
         cached_db = workspace / ".app-data" / "cache" / "vocab.db"
         if cached_db.exists():
@@ -332,27 +394,35 @@ def _load_catalog_with_sources(workspace: Path, *, reconcile_kindle: bool = True
                 )
             except Exception:
                 logger.exception("Failed to reconcile cached Kindle database")
-
-    app_settings = settings.load(workspace)
-    if reconcile_obsidian and app_settings.obsidian_sync_enabled and app_settings.obsidian_vault_path and app_settings.obsidian_cards_path:
-        cards_dir = Path(app_settings.obsidian_vault_path) / app_settings.obsidian_cards_path
-        try:
-            catalog = vocab_cache.merge_obsidian(catalog, obsidian_sync.read_cards(cards_dir))
-        except Exception:
-            logger.exception("Failed to reconcile Obsidian cards")
     _refresh_obsidian_destination_states(catalog)
-    vocab_cache.save(workspace, catalog)
+    if reconcile_kindle:
+        repository.save_catalog(catalog)
+    if reconcile_obsidian:
+        app_settings = settings.load(workspace)
+        if (
+            app_settings.obsidian_sync_enabled
+            and app_settings.obsidian_vault_path
+            and app_settings.obsidian_cards_path
+        ):
+            cards_dir = Path(app_settings.obsidian_vault_path) / app_settings.obsidian_cards_path
+            try:
+                _reconcile_obsidian(catalog, cards_dir)
+                repository.save_catalog(catalog)
+            except Exception:
+                logger.exception("Failed to reconcile Obsidian cards")
     return catalog
 
 
 def _connector_status(workspace: Path, *, probe_kindle: bool) -> dict[str, Any]:
     app_settings = settings.load(workspace)
-    source = find_kindle_source() if probe_kindle else None
-    kindle = {
-        "state": "connected" if source is not None else ("disconnected" if probe_kindle else "unknown"),
-        "label": source.label if source is not None else "Kindle",
+    presence = find_kindle_presence() if probe_kindle else None
+    kindle: dict[str, Any] = {
+        "state": "connected" if presence is not None else ("disconnected" if probe_kindle else "unknown"),
+        "label": presence.label if presence is not None else "Kindle",
         "checked_at": vocab_cache.utc_now(),
     }
+    if presence is not None:
+        kindle["signature"] = list(presence.signature)
     cards_dir = Path(app_settings.obsidian_vault_path) / app_settings.obsidian_cards_path if app_settings.obsidian_vault_path else None
     configured = bool(app_settings.obsidian_sync_enabled and cards_dir)
     obsidian_state = "disabled"
@@ -374,9 +444,11 @@ def _catalog_response(
     source_name: str = "Локальная библиотека",
     source_status: str = "Сохранённые слова доступны без устройства",
     connector_status: dict[str, Any] | None = None,
+    queue_status: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     result = vocab_cache.frontend_state(catalog, source_name=source_name, source_status=source_status)
     result["connectors"] = connector_status or _connector_status(_workspace_root(), probe_kindle=False)
+    result["queueStatus"] = queue_status or {"pending": 0, "processing": 0, "failed": 0, "total": 0}
     return result
 
 
@@ -404,28 +476,88 @@ def _lexeme_as_entry(lexeme: dict[str, Any]) -> dict[str, Any]:
 
 
 def _refresh_obsidian_destination_states(catalog: dict[str, Any]) -> None:
-    """Keep the Obsidian queue reason aligned with the independent processing state."""
+    """Derive Obsidian eligibility without treating it as a vocabulary source."""
     for lexeme in catalog.get("lexemes") or []:
         destination = (lexeme.get("destinations") or {}).get("obsidian")
-        if not isinstance(destination, dict) or destination.get("state") == "synced":
+        if not isinstance(destination, dict):
             continue
         processing_state = str((lexeme.get("processing") or {}).get("state") or "pending")
-        if processing_state == "ready":
-            destination.update({"state": "not_synced", "reason": ""})
+        analysis = (lexeme.get("processing") or {}).get("analysis") or {}
+        score = analysis.get("importance_score")
+        eligible = (
+            processing_state == "ready"
+            and analysis.get("accepted") is not False
+            and isinstance(score, (int, float))
+            and 3 <= score <= 10
+        )
+        destination["eligible"] = eligible
+        destination["external_key"] = vocab_cache.normalize_lemma(
+            str(analysis.get("base_form") or lexeme.get("lemma") or "")
+        )
+        destination.setdefault("last_checked_at", "")
+        destination.setdefault("last_synced_at", "")
+        if eligible:
+            if destination.get("state") not in {"synced", "failed"}:
+                destination["state"] = "missing"
+            if destination.get("state") != "failed":
+                destination["reason"] = ""
         elif processing_state == "rejected":
             reason = str(destination.get("reason") or "")
-            warnings = (lexeme.get("processing") or {}).get("analysis") or {}
-            unsupported = "unsupported_language" in (warnings.get("warnings") or [])
+            unsupported = "unsupported_language" in (analysis.get("warnings") or [])
             destination.update(
                 {
-                    "state": "not_synced",
+                    "state": "not_applicable",
                     "reason": "unsupported_language" if unsupported or reason == "unsupported_language" else "rejected",
                 }
             )
         elif processing_state == "failed":
-            destination.update({"state": "not_synced", "reason": "processing_failed"})
+            destination.update({"state": "not_applicable", "reason": "processing_failed"})
+        elif processing_state == "ready":
+            destination.update({"state": "not_applicable", "reason": "unsupported_priority"})
         else:
-            destination.update({"state": "not_synced", "reason": "waiting_processing"})
+            destination.update({"state": "not_applicable", "reason": "waiting_processing"})
+
+
+def _reconcile_obsidian(catalog: dict[str, Any], cards_dir: Path) -> int:
+    """Refresh destination evidence without importing Obsidian vocabulary."""
+    cards = obsidian_sync.read_cards(cards_dir)
+    existing_keys = {
+        vocab_cache.normalize_lemma(
+            str((item.get("analysis") or {}).get("base_form") or item.get("stem") or item.get("word") or "")
+        )
+        for item in cards
+    }
+    existing_keys.discard("")
+    now = vocab_cache.utc_now()
+    _refresh_obsidian_destination_states(catalog)
+    for lexeme in catalog.get("lexemes") or []:
+        destination = lexeme["destinations"]["obsidian"]
+        destination["last_checked_at"] = now
+        if not destination.get("eligible"):
+            destination["state"] = "not_applicable"
+            continue
+        analysis = (lexeme.get("processing") or {}).get("analysis") or {}
+        aliases = {
+            vocab_cache.normalize_lemma(str(value or ""))
+            for value in [
+                lexeme.get("lemma"),
+                lexeme.get("display_form"),
+                analysis.get("base_form"),
+                *(lexeme.get("forms") or []),
+            ]
+        }
+        aliases.discard("")
+        if aliases & existing_keys:
+            destination.update(
+                {
+                    "state": "synced",
+                    "reason": "",
+                    "last_synced_at": destination.get("last_synced_at") or now,
+                }
+            )
+        else:
+            destination.update({"state": "missing", "reason": ""})
+    return len(cards)
 
 
 def _analysis_for_unsupported_entry(lexeme: dict[str, Any]) -> dict[str, Any]:
@@ -484,28 +616,6 @@ def _analysis_by_lemma(analysis_dir: Path) -> tuple[dict[str, dict[str, Any]], d
         if entry_id:
             by_id[entry_id] = analysis
     return by_lemma, by_id
-
-
-def _analysis_from_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
-    """Build a minimal analysis dict from a processed-snapshot entry."""
-    return {
-        "base_form": str(payload.get("base_form") or ""),
-        "pos": "",
-        "accepted": bool(payload.get("accepted", True)),
-        "importance_score": payload.get("importance"),
-        "importance_note": "уже обработано ранее",
-        "frequency_note": "",
-        "lemma_zipf": None,
-        "form_zipf": None,
-        "wordnet_synset_count": None,
-        "wordnet_pos_count": None,
-        "warnings": [],
-        "tags": "",
-        "source_word_forms": list(payload.get("source_word_forms") or []),
-        "source_occurrence_count": payload.get("source_occurrence_count"),
-        "processed_at": str(payload.get("last_seen_at") or ""),
-        "translation_status": "offline_only",
-    }
 
 
 def _configure_stdio() -> None:

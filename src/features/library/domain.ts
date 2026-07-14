@@ -1,6 +1,33 @@
-import type { BookOption, LexemeOccurrence, LexemeRecord, Operation, ProcessingState } from "@/types";
+import type { BookOption, ConnectorInfo, LexemeOccurrence, LexemeRecord, Operation, ProcessingState } from "@/types";
 
 export type QuickFilter = "all" | "new" | "pending" | "ready" | "unsynced";
+
+export const KINDLE_PROBE_INTERVAL_MS = 60_000;
+export const KINDLE_AUTO_SYNC_RETRY_MS = 5 * 60_000;
+
+export function kindleSignature(info: ConnectorInfo): string {
+  return (info.signature ?? []).map((part) => part.trim()).filter(Boolean).join("|");
+}
+
+export function shouldAutoSyncKindle({
+  previous,
+  current,
+  lastSyncedSignature,
+  lastAttemptAt,
+  now,
+}: {
+  previous: ConnectorInfo;
+  current: ConnectorInfo;
+  lastSyncedSignature: string | null;
+  lastAttemptAt: number;
+  now: number;
+}): boolean {
+  const signature = kindleSignature(current);
+  if (current.state !== "connected" || !signature) return false;
+  if (previous.state !== "connected") return true;
+  if (lastSyncedSignature === signature) return false;
+  return now - lastAttemptAt >= KINDLE_AUTO_SYNC_RETRY_MS;
+}
 
 export const idleOperation: Operation = {
   id: "",
@@ -36,10 +63,10 @@ export function filterLexemes(
       const bookMatch = !selectedBookKey || entry.occurrences.some((item) => item.book_key === selectedBookKey);
       const filterMatch =
         filter === "all" ||
-        (filter === "new" && entry.freshness === "new") ||
+        (filter === "new" && isAcceptedNew(entry)) ||
         (filter === "pending" && ["pending", "failed"].includes(entry.processing.state)) ||
         (filter === "ready" && entry.processing.state === "ready") ||
-        (filter === "unsynced" && entry.destinations.obsidian.state !== "synced");
+        (filter === "unsynced" && isMissingFromObsidian(entry));
       if (!bookMatch || !filterMatch) return false;
       if (!normalizedQuery) return true;
       const occurrenceText = entry.occurrences.flatMap((item) => [item.context, item.book_title, item.authors]);
@@ -57,10 +84,10 @@ export function counts(entries: LexemeRecord[]) {
   return entries.reduce(
     (result, entry) => {
       result.all += 1;
-      if (entry.freshness === "new") result.new += 1;
+      if (isAcceptedNew(entry)) result.new += 1;
       if (["pending", "failed"].includes(entry.processing.state)) result.pending += 1;
       if (entry.processing.state === "ready") result.ready += 1;
-      if (entry.destinations.obsidian.state !== "synced") result.unsynced += 1;
+      if (isMissingFromObsidian(entry)) result.unsynced += 1;
       return result;
     },
     { all: 0, new: 0, pending: 0, ready: 0, unsynced: 0 },
@@ -73,6 +100,7 @@ export function processable(entries: LexemeRecord[]): LexemeRecord[] {
 
 export function obsidianSyncReason(entry: LexemeRecord): string {
   if (entry.destinations.obsidian.state === "synced") return "Карточка находится в Obsidian";
+  if (entry.destinations.obsidian.state === "failed") return "Последняя синхронизация завершилась ошибкой";
   if (entry.processing.state === "pending") return "Сначала выполните offline-обработку";
   if (entry.processing.state === "processing") return "Обработка ещё выполняется";
   if (entry.processing.state === "rejected") return "Лемма отклонена локальными правилами";
@@ -80,6 +108,14 @@ export function obsidianSyncReason(entry: LexemeRecord): string {
   const score = entry.processing.analysis?.importance_score;
   if (typeof score !== "number" || score < 3 || score > 10) return "Приоритет не подходит для текущего шаблона Obsidian";
   return "Готово к синхронизации";
+}
+
+export function isAcceptedNew(entry: LexemeRecord): boolean {
+  return entry.freshness === "new" && entry.processing.state === "ready" && entry.processing.analysis?.accepted !== false;
+}
+
+export function isMissingFromObsidian(entry: LexemeRecord): boolean {
+  return entry.destinations.obsidian.eligible && entry.destinations.obsidian.state === "missing";
 }
 
 export function processingLabel(state: ProcessingState): string {

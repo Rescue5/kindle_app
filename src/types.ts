@@ -3,7 +3,7 @@ export type BookOption = {
   key: string;
 };
 
-export type OccurrenceSource = "kindle" | "obsidian" | "legacy";
+export type OccurrenceSource = "kindle" | "legacy";
 
 export type LexemeOccurrence = {
   id: string;
@@ -18,7 +18,7 @@ export type LexemeOccurrence = {
 
 export type Freshness = "new" | "known";
 export type ProcessingState = "pending" | "processing" | "ready" | "rejected" | "failed";
-export type SyncState = "not_synced" | "syncing" | "synced" | "failed";
+export type SyncState = "missing" | "synced" | "not_applicable" | "failed";
 export type ExportState = "not_exported" | "exporting" | "exported" | "failed";
 
 export type WordAnalysis = {
@@ -60,13 +60,15 @@ export type LexemeRecord = {
   };
   sources: {
     kindle: boolean;
-    obsidian: boolean;
     legacy: boolean;
   };
   destinations: {
     obsidian: {
       state: SyncState;
+      eligible: boolean;
       reason: string;
+      external_key: string;
+      last_checked_at: string;
       last_synced_at: string;
     };
     anki: {
@@ -89,6 +91,7 @@ export type ConnectorInfo = {
   state: ConnectorState;
   label: string;
   checked_at: string;
+  signature?: string[];
 };
 
 export type ConnectorStatus = {
@@ -103,6 +106,14 @@ export type LibraryResult = {
   entries: LexemeRecord[];
   last_kindle_sync_id: string;
   connectors: ConnectorStatus;
+  queueStatus: QueueStatus;
+};
+
+export type QueueStatus = {
+  pending: number;
+  processing: number;
+  failed: number;
+  total: number;
 };
 
 export type ProgressEvent = {

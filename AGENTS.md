@@ -111,14 +111,19 @@ python -m nltk.downloader -q wordnet omw-1.4 averaged_perceptron_tagger_eng punk
   filtered entries.
 - `kindle_vocab_app/vocab_optimizer.py` performs deterministic offline word
   filtering, scoring, TSV generation, and per-word JSON analysis.
-- `kindle_vocab_app/processing_state.py` stores the durable processed snapshot.
+- `kindle_vocab_app/library_repository.py` owns the authoritative local SQLite
+  library, schema migration, canonical deduplication, processing queue, and
+  destination state. The database is `.app-data/kindle_cards.sqlite3`.
+- `kindle_vocab_app/processing_state.py` stores the legacy snapshot used only by
+  standalone optimizer CLI compatibility and one-time SQLite migration.
 - `kindle_vocab_app/llm_enricher.py` optionally enriches existing TSV rows
   through the DS Lab/OpenAI-compatible API.
 - `kindle_vocab_app/optimizer_cli.py` exposes optimizer and enrichment CLI modes.
 - `kindle_vocab_app/settings.py` persists application settings to
   `.app-data/settings.json`.
-- `kindle_vocab_app/vocab_cache.py` persists the last loaded vocabulary state to
-  `.app-data/vocab_cache.json` so the library is available on restart.
+- `kindle_vocab_app/vocab_cache.py` contains legacy catalog normalization and
+  Kindle merge helpers. `.app-data/vocab_cache.json` is migration input, not an
+  application source of truth after SQLite has been created.
 - `kindle_vocab_app/obsidian_sync.py` reads and writes Spaced Repetition cards in
   Obsidian markdown format, handles priority-file mapping, and backs up the
   Obsidian cards folder before writes.
@@ -127,35 +132,27 @@ python -m nltk.downloader -q wordnet omw-1.4 averaged_perceptron_tagger_eng punk
 
 The Tauri bridge currently supports these actions:
 
-- `scan`: find Kindle, copy `vocab.db` into `.app-data/cache`, validate it, and
-  return loaded vocabulary state. Merges the result with any previously cached
-  state in `.app-data/vocab_cache.json`, preserving `processing_status` and
-  `analysis` for already-seen entries and skipping fresh entries whose base form
-  is already represented in the cache. Falls back to the cached state when no
-  device is found, and to demo state when there is neither a device nor a cache.
+- `scan` / `sync_kindle`: find Kindle, copy `vocab.db` into `.app-data/cache`,
+  validate it, merge forms and contexts into SQLite, and enqueue only unseen
+  canonical lexemes for processing.
 - `load_demo`: return demo vocabulary state without touching a Kindle or cache.
-- `load_cached`: return the persisted vocabulary state from
-  `.app-data/vocab_cache.json`. Falls back to demo state when no cache exists.
-  The frontend calls this on startup so the last loaded vocabulary is available
-  immediately.
-- `optimize`: run `optimize_entries(...)` into `.app-data/optimized`, update
-  `processed_snapshot.json`, write `optimized.tsv`, and emit per-entry analysis
-  loaded from `word_analysis/*.json`.
+- `load_library` / `load_cached`: return the SQLite library and durable queue
+  status without touching Kindle or Obsidian.
+- `process_queue`: sequentially analyze the persistent SQLite queue and commit
+  every completed lexeme before moving to the next one. The frontend starts it
+  automatically while the application is open.
+- `process_lexemes` / `optimize`: compatible explicit processing actions for
+  selected queued ids; application state still commits to SQLite.
 - `export`: write `.app-data/kindle-anki.tsv` or `.app-data/kindle-quizlet.tsv`.
 - `load_settings`: return the persisted `AppSettings` dict from
   `.app-data/settings.json` (or defaults if missing).
 - `save_settings`: validate and persist a settings dict; returns `{"saved": true}`.
-- `load_obsidian`: parse Spaced Repetition cards from the configured Obsidian
-  vault path and return vocabulary state. Cards are treated as already processed.
-- `save_cache`: persist an arbitrary vocabulary state dict to
-  `.app-data/vocab_cache.json`. Used to keep the local cache in sync with
-  Obsidian so that Kindle scans can skip words already present in Obsidian and
-  so that falling back to local cache preserves Obsidian-processed entries.
-  Returns `{"saved": true}`.
-- `sync_obsidian`: append newly processed entries to the appropriate Obsidian
-  priority files, skipping unprocessed or low-importance words. Backs up the
-  Obsidian cards folder first (unless disabled in settings). Returns
-  `{"added", "skipped", "files", "backup_path"}`.
+- `load_obsidian`: read-only reconciliation. It checks whether existing SQLite
+  lexemes are present in Obsidian but never imports cards, contexts, analyses,
+  priorities, or translations into the database.
+- `sync_obsidian`: reconcile the live vault, append only eligible
+  `ready + accepted + score 3..10` SQLite lexemes, verify the append, and then
+  persist destination evidence. Obsidian is never a vocabulary source.
 
 Bridge output must be clean JSON on stdout. Do not add debug `print(...)` calls
 to stdout in bridge code; use logging/stderr/file logs. The Rust bridge forces
@@ -172,8 +169,12 @@ Environment variables used by the bridge and launcher:
 The optimizer is intentionally deterministic and explainable. Preserve that
 property unless the user explicitly asks for a different model.
 
-- Process only unseen lexical keys by default.
-- Persist state in `processed_snapshot.json`.
+- Process only unseen canonical lexical keys by default.
+- Persist desktop state and the resumable queue in SQLite after every lexeme.
+- Treat Obsidian as a one-way destination: `Kindle -> SQLite -> Obsidian`.
+- Never restore application state from JSON once SQLite migration succeeded.
+- Keep `processed_snapshot.json` only for standalone CLI compatibility and
+  migration of older installations.
 - Preserve existing optimized TSV rows when rerunning incremental processing.
 - Write per-word JSON audit files under `word_analysis/`.
 - Leave translation/enrichment fields empty when local logic cannot derive them

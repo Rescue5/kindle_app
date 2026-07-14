@@ -129,10 +129,16 @@ Features:
 - searching across words, contexts, and book metadata;
 - previewing words and contexts;
 - exporting the current filtered selection to Anki or Quizlet;
-- optimizing only previously unseen words into `optimized.tsv` plus per-word
-  JSON analysis files.
+- automatically processing previously unseen canonical words in a resumable
+  background queue while the application is open;
+- storing the authoritative library in `.app-data/kindle_cards.sqlite3`;
+- synchronizing accepted words one-way from SQLite to Obsidian without importing
+  or overwriting vocabulary from the vault;
+- writing `optimized.tsv` plus per-word JSON analysis files as export/audit
+  artifacts.
 
-The application checks for newly connected devices every three seconds. On
+The application checks for newly connected devices with a passive probe once a
+minute. On
 Windows it supports both ordinary drive letters and Kindle devices shown in
 Explorer as `This PC > Kindle` through MTP/WPD. It also supports macOS
 `/Volumes` and common Linux mount locations under `/media`, `/run/media`, and
@@ -140,8 +146,9 @@ Explorer as `This PC > Kindle` through MTP/WPD. It also supports macOS
 
 ## Optimized Export
 
-The optimizer keeps a local `processed_snapshot.json` so already processed
-lemmas and phrases are not processed again. It writes:
+The desktop application keeps processed lemmas and its resumable queue in
+SQLite so already processed items are not processed again. The standalone CLI
+retains `processed_snapshot.json` compatibility. The optimizer writes:
 
 - `optimized.tsv`: same columns as the existing optimized Anki template;
 - `word_analysis/*.json`: detailed deterministic scoring audit per new word.

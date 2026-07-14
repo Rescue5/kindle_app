@@ -67,6 +67,7 @@ def append_cards(
         _normalize_base(str((item.get("analysis") or {}).get("base_form") or item.get("stem") or item.get("word") or ""))
         for item in read_cards(cards_dir)
     }
+    scheduled_lemmas = set(existing_lemmas)
     item_results: list[dict[str, str]] = []
     skipped = 0
 
@@ -75,7 +76,7 @@ def append_cards(
         status = entry.get("processing_status")
         analysis = entry.get("analysis") or {}
         lemma = _normalize_base(str(analysis.get("base_form") or entry.get("stem") or entry.get("word") or ""))
-        if lemma and lemma in existing_lemmas:
+        if lemma and lemma in scheduled_lemmas:
             skipped += 1
             item_results.append({"id": item_id, "outcome": "already_present", "reason": ""})
             continue
@@ -89,6 +90,8 @@ def append_cards(
             skipped += 1
             item_results.append({"id": item_id, "outcome": "blocked", "reason": "unsupported_priority"})
             continue
+        if lemma:
+            scheduled_lemmas.add(lemma)
         by_file[_FILE_BY_PRIORITY[score]].append(entry)
 
     backup_path = backup_cards(cards_dir, backups_dir) if backup_enabled and by_file else None
@@ -98,6 +101,7 @@ def append_cards(
     for filename in sorted(by_file.keys()):
         file_path = cards_dir / filename
         is_new = not file_path.exists()
+        previous_bytes = file_path.read_bytes() if file_path.exists() else b""
         existing_keys = _existing_card_keys(file_path)
         new_cards: list[str] = []
 
@@ -127,6 +131,8 @@ def append_cards(
                 file.write(_CARD_SEPARATOR)
             file.write(rendered)
             file.write("\n")
+        if previous_bytes and not file_path.read_bytes().startswith(previous_bytes):
+            raise RuntimeError(f"Obsidian append verification failed for {filename}")
         files_touched.add(filename)
 
     result = {

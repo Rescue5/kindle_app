@@ -84,6 +84,48 @@ class ObsidianParserTests(unittest.TestCase):
             outcomes = {item["id"]: item["outcome"] for item in result["items"]}
             self.assertEqual(outcomes, {"ready": "added", "pending": "blocked"})
 
+    def test_append_preserves_prefix_and_deduplicates_lemma_within_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cards = root / "cards"
+            first = {
+                "id": "first",
+                "word": "leaned",
+                "stem": "lean",
+                "context": "He leaned closer.",
+                "book_title": "Book",
+                "authors": "Author",
+                "processing_status": "processed",
+                "analysis": {"base_form": "lean", "accepted": True, "importance_score": 7},
+            }
+            append_cards(cards, [first], root / "backups", backup_enabled=False)
+            path = cards / "04 - Priority 7.md"
+            original = path.read_bytes()
+
+            duplicate = {
+                **first,
+                "id": "duplicate",
+                "word": "leaning",
+                "context": "She was leaning over the desk.",
+                "analysis": {"base_form": "lean", "accepted": True, "importance_score": 6},
+            }
+            unique = {
+                **first,
+                "id": "unique",
+                "word": "glimpse",
+                "stem": "glimpse",
+                "context": "He caught a glimpse.",
+                "analysis": {"base_form": "glimpse", "accepted": True, "importance_score": 7},
+            }
+            result = append_cards(
+                cards, [duplicate, unique], root / "backups", backup_enabled=False
+            )
+
+            outcomes = {item["id"]: item["outcome"] for item in result["items"]}
+            self.assertEqual(outcomes["duplicate"], "already_present")
+            self.assertEqual(outcomes["unique"], "added")
+            self.assertTrue(path.read_bytes().startswith(original))
+
 
 if __name__ == "__main__":
     unittest.main()

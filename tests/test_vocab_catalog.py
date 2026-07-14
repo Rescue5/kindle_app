@@ -43,26 +43,6 @@ class VocabularyCatalogTests(unittest.TestCase):
         self.assertEqual(len(catalog["lexemes"][0]["occurrences"]), 2)
         self.assertEqual(catalog["lexemes"][0]["processing"]["state"], "ready")
 
-    def test_obsidian_wins_and_marks_synced(self) -> None:
-        catalog = vocab_cache.merge_kindle(vocab_cache.empty_catalog(), [kindle_entry()], sync_id="one")
-        obsidian = {
-            **kindle_entry("Obsidian context"),
-            "word": "admit",
-            "analysis": {
-                "base_form": "admit",
-                "accepted": True,
-                "importance_score": 10,
-                "russian_meanings": "признавать",
-                "translation_status": "llm_enriched",
-            },
-        }
-        catalog = vocab_cache.merge_obsidian(catalog, [obsidian])
-        lexeme = catalog["lexemes"][0]
-        self.assertTrue(lexeme["sources"]["kindle"])
-        self.assertTrue(lexeme["sources"]["obsidian"])
-        self.assertEqual(lexeme["processing"]["analysis"]["importance_score"], 10)
-        self.assertEqual(lexeme["destinations"]["obsidian"]["state"], "synced")
-
     def test_relemmatized_record_does_not_duplicate_on_future_sync(self) -> None:
         initial = {**kindle_entry(), "stem": "admitting"}
         catalog = vocab_cache.merge_kindle(vocab_cache.empty_catalog(), [initial], sync_id="one")

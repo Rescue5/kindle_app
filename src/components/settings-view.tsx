@@ -188,7 +188,7 @@ export function SettingsView({ settings, onChange }: SettingsViewProps) {
           <div
             className={`flex items-center justify-between gap-4 rounded-[10px] border px-4 py-3 text-sm ${
               settings.obsidian_sync_enabled
-                ? "border-purple-500/25 bg-purple-500/8 text-purple-200"
+                ? "border-purple-700/25 bg-purple-700/5 text-purple-800"
                 : "border-line bg-panel-raised/40 text-muted-foreground"
             }`}
           >
@@ -196,7 +196,7 @@ export function SettingsView({ settings, onChange }: SettingsViewProps) {
               <span className={`h-2 w-2 rounded-full ${settings.obsidian_sync_enabled ? "bg-purple-400" : "bg-muted-foreground"}`} />
               <div>
                 <label htmlFor="obsidian-enabled-switch" className="font-medium">Синхронизация с Obsidian</label>
-                <p className="mt-0.5 text-xs opacity-75">Импортировать готовые карточки и отправлять глобальную очередь.</p>
+                <p className="mt-0.5 text-xs opacity-75">Добавлять подходящие слова из библиотеки в Obsidian.</p>
               </div>
             </div>
             <Switch

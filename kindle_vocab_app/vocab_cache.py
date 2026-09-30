@@ -151,6 +151,15 @@ def lexeme_id(language: str, key: str) -> str:
 
 
 def occurrence_id(entry: dict[str, Any], source: str) -> str:
+    lookup_id = entry.get("lookup_id")
+    if source == "kindle" and lookup_id is not None and str(lookup_id) != "":
+        return hashlib.sha1(
+            f"kindle|lookup-id|{lookup_id}".encode("utf-8", errors="replace")
+        ).hexdigest()
+    return _content_occurrence_id(entry, source)
+
+
+def _content_occurrence_id(entry: dict[str, Any], source: str) -> str:
     raw = "|".join(
         [
             source,
@@ -167,6 +176,7 @@ def occurrence_id(entry: dict[str, Any], source: str) -> str:
 def books_from_lexemes(lexemes: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
     counts: dict[str, int] = {}
     labels: dict[str, str] = {}
+    metadata: dict[str, dict[str, str]] = {}
     for lexeme in lexemes:
         seen_for_lexeme: set[str] = set()
         for occurrence in lexeme.get("occurrences") or []:
@@ -178,9 +188,10 @@ def books_from_lexemes(lexemes: Iterable[dict[str, Any]]) -> list[dict[str, str]
             title = str(occurrence.get("book_title") or key)
             authors = str(occurrence.get("authors") or "")
             labels[key] = f"{title} · {authors}" if authors else title
+            metadata[key] = {"title": title, "authors": authors}
     books = [{"label": "Все книги", "key": ""}]
     for key in sorted(counts, key=lambda item: labels[item].casefold()):
-        books.append({"label": f"{labels[key]} · {counts[key]}", "key": key})
+        books.append({"label": f"{labels[key]} · {counts[key]}", "key": key, **metadata[key]})
     return books
 
 
@@ -238,6 +249,17 @@ def _merge_entry(
     if word and word not in lexeme["forms"]:
         lexeme["forms"].append(word)
     occurrence = _occurrence_from_entry(entry, source)
+    if source == "kindle" and entry.get("lookup_id") is not None and str(entry["lookup_id"]) != "":
+        # Before lookup IDs were retained, the bridge hashed content and either
+        # a full timestamp or its date. Replace only those legacy rows; new
+        # lookup-ID rows must remain distinct even when content is identical.
+        legacy_ids = {_content_occurrence_id(entry, source)}
+        dated_entry = {**entry, "looked_up_at": str(entry.get("looked_up_at") or "").split("T", 1)[0]}
+        legacy_ids.add(_content_occurrence_id(dated_entry, source))
+        lexeme["occurrences"] = [
+            item for item in lexeme["occurrences"]
+            if not (item.get("source") == "kindle" and item.get("id") in legacy_ids)
+        ]
     if occurrence["id"] not in {item["id"] for item in lexeme["occurrences"]}:
         lexeme["occurrences"].append(occurrence)
 

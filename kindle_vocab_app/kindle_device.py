@@ -27,6 +27,7 @@ class KindleVocabSource:
     signature: tuple[str, ...]
     path: Path | None = None
     shell_item: Any | None = None
+    mac_mtp: bool = False
 
     def copy_to_cache(self, cache_dir: Path) -> Path:
         logger.info(
@@ -35,6 +36,9 @@ class KindleVocabSource:
             cache_dir,
             "mtp" if self.shell_item is not None else "path",
         )
+        if self.mac_mtp:
+            from kindle_vocab_app.kindle_mtp import copy_mac_vocab
+            return copy_mac_vocab(cache_dir)
         if self.shell_item is not None:
             return _copy_shell_item(self.shell_item, cache_dir)
         if self.path is None:
@@ -64,6 +68,11 @@ def find_kindle_presence(roots: Iterable[Path] | None = None) -> KindlePresence 
             label=f"Kindle · {label or root.anchor or 'USB'}",
             signature=("volume", str(root).casefold()),
         )
+    if sys.platform == "darwin" and roots is None:
+        from kindle_vocab_app.kindle_mtp import mac_kindle_identity
+        identity = mac_kindle_identity()
+        if identity:
+            return KindlePresence(label="Kindle · USB MTP", signature=identity)
     return None
 
 
@@ -81,6 +90,12 @@ def find_kindle_source(roots: Iterable[Path] | None = None) -> KindleVocabSource
 
     path = find_kindle_vocab(roots)
     if path is None:
+        if sys.platform == "darwin" and roots is None:
+            from kindle_vocab_app.kindle_mtp import kalam_library_path, mac_kindle_identity
+            identity = mac_kindle_identity()
+            if identity:
+                kalam_library_path()
+                return KindleVocabSource(label="Kindle · USB MTP", signature=identity, mac_mtp=True)
         logger.info("No Kindle vocab source found")
         return None
     stat = path.stat()

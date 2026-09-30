@@ -656,3 +656,309 @@ destination rather than a source of vocabulary state.
   device boundary rather than a live USB sync.
 - The standalone optimizer CLI intentionally retains snapshot compatibility;
   application runtime state is SQLite-only.
+
+## 2026-09-29 - Codex - Initialize macOS development workspace
+
+### Goal
+
+Initialize this local workspace from `git@github.com:Rescue5/kindle_app.git` and
+install the documented development environment.
+
+### Changes
+
+- Configured `origin` and checked out `main` at `1a0d815`, tracking
+  `origin/main`.
+- Ran `scripts/setup-dev.sh`, creating the `kindle_app` conda environment and
+  installing the Python package, npm dependencies, and NLTK resources.
+- No application source files were changed.
+
+### Verification
+
+- `kindle-vocab-doctor`: all checks passed.
+- `conda run -n kindle_app npm run build`: passed.
+- `conda run -n kindle_app python -m unittest discover -s tests`: 21 passed.
+- `conda run -n kindle_app npm test`: 8 passed.
+
+### Remaining Risk
+
+- npm reported 6 dependency advisories (3 moderate, 3 high) during installation;
+  dependencies were not changed beyond the committed lockfile.
+
+## 2026-09-29 - Codex Review backend subagent - Durable review queue
+
+### Goal
+
+Add a small offline review loop for accepted vocabulary without changing Kindle processing or inventing translations.
+
+### Changes
+
+- Added SQLite schema v2 with per-lexeme review schedule and ratings.
+- Added `load_review` and `rate_review` bridge actions. Due cards contain stored analysis and Kindle occurrences; rejected words are excluded.
+- Preserved review progress across full catalog replacements used by Kindle and Obsidian synchronization.
+- Added focused tests for eligibility, rating intervals, persistence, migration from schema v1, bridge actions, and invalid requests.
+
+### Verification
+
+- `conda run -n kindle_app python -m unittest discover -s tests -v`: 25 passed.
+- `git diff --check`: passed.
+
+### Remaining Risk
+
+- The scheduling rules are intentionally basic: again after 10 minutes, hard after at least 1 day, and good after at least 3 days. No long-term retention model or daily new-card limit is implemented.
+
+## 2026-09-29 - Codex subagent - Books and Insights views
+
+### Goal
+
+Add book and reading-insight screens using only the existing `BookOption`,
+`LexemeRecord`, and occurrence data.
+
+### Decisions And Changes
+
+- Added `src/features/reading/reading-domain.ts` for book grouping, validated
+  date keys, daily activity, and repeat counts.
+- Added `src/features/reading/books-view.tsx` with a searchable book shelf,
+  selected-book summary, word search, repeat filter, and word-open callback.
+- Added `src/features/reading/insights-view.tsx` with factual vocabulary,
+  occurrence, book, repeat, and dated activity summaries.
+- No reading progress, chapter position, or reading speed is inferred.
+
+### Verification
+
+- `conda run -n kindle_app ./node_modules/.bin/tsc --noEmit`: passed.
+- `git diff --check`: passed before this log append.
+
+### Remaining Risk
+
+- These new views are not yet connected to the application navigation in this
+  independent work lane. Visual QA belongs to the integration pass after the
+  parent wires the screens into the running app.
+
+## 2026-09-29 - Codex - Reading companion interface integrated
+
+### Goal
+
+Turn the utility-focused desktop workspace into a reading vocabulary companion
+with a useful home, books, words, review, and insights flow.
+
+### Decisions And Changes
+
+- Created a literary light visual direction and implemented the new navigation,
+  home, review card UI, compact background status, and responsive layouts.
+- Connected Books and Insights to real saved Kindle occurrences. The home uses
+  the latest recorded book, and never invents reading progress or book covers.
+- Kept export inside Words and moved processing out of navigation. Added a
+  shortcut to review newly found words with the existing New filter.
+- Improved the word inspector with its saved context and available translation
+  first, plus a calmer treatment of technical analysis and Obsidian state.
+- Added browser-preview review actions and focused tests for book grouping,
+  activity dates, repeat counts, and Russian count forms.
+- Replaced the mismatched app icon with a matching SVG source and PNG/ICO/ICNS
+  variants. Added the missing PNG required by Tauri's macOS build context.
+- Updated README and architecture notes for the new UI and Review actions.
+
+### Verification
+
+- `conda run -n kindle_app npm run build`: passed.
+- `conda run -n kindle_app npm test`: 10 passed.
+- `conda run -n kindle_app python -m unittest discover -s tests`: 25 passed.
+- `conda run -n kindle_app cargo check -q --manifest-path src-tauri/Cargo.toml`:
+  passed after adding the missing icon.
+- In-app browser QA covered Home, book selection, book-to-word navigation,
+  review reveal and rating, Insights, and Settings. Reviewed desktop, the
+  normal browser window, and a 390 px mobile viewport; no horizontal document
+  overflow or console warnings/errors were observed.
+- `git diff --check`: passed.
+
+### Remaining Risk
+
+- Browser QA used sample data. A live Kindle and the full Tauri WebView workflow
+  were not exercised here.
+- Review scheduling is intentionally simple; AI explanations and reading
+  progress are omitted because the current data cannot support them reliably.
+
+## 2026-09-30 - Codex MTP test subagent - Sync audit and macOS MTP coverage
+
+### Goal
+
+Review existing Kindle synchronization for idempotency and add focused tests for the new macOS MTP adapter without accessing personal vocabulary contents.
+
+### Findings
+
+- SQLite library changes occur only after device copy, database validation, and entry extraction. A transfer failure leaves the library intact.
+- Existing mounted-path and Windows MTP copy helpers replace the cached `vocab.db` before SQLite validation; the macOS adapter instead validates its staging copy before replacement.
+- Occurrence identity currently uses word, context, book, and date; duplicate lookups with the same values on one day may be counted once. This affects repeated-lookup metrics but does not duplicate processing of known lexemes.
+
+### Changes
+
+- Added `tests/test_kindle_mtp.py` with synthetic USB trees, fake MTP sessions, and temporary SQLite fixtures. Tests cover passive detection, Kindle-only device selection, worker timeout and malformed JSON, incomplete transfer preserving the previous cache, validated cache replacement, and thumbnail path restrictions.
+
+### Verification
+
+- `conda run -n kindle_app python -m unittest tests.test_kindle_mtp -v`: 6 passed.
+- `conda run -n kindle_app python -m unittest discover -s tests -v`: 36 passed.
+- `git diff --check`: passed.
+
+### Remaining Risk
+
+- The native Kalam ABI and a live USB transfer require separate integration verification; these tests do not open a physical Kindle.
+
+## 2026-09-30 - Codex subagent - Book cover cache and reading UI
+
+### Goal
+
+Show genuine Kindle or Open Library book covers in Home and Books, with a local
+cache and a manual Books action to fetch missing covers.
+
+### Decisions And Changes
+
+- Added `kindle_vocab_app/book_covers.py` with `attach_covers`,
+  `prefer_local_covers`, and `download_covers`. Kindle portrait thumbnails are
+  matched by an ASIN present in the book key and take priority. Open Library
+  search uses exact normalized title and author matches, then downloads a
+  medium JPEG by Cover ID. Ambiguous works are skipped.
+- Limited Open Library requests to HTTPS trusted hosts, bounded response sizes
+  and timeouts, and at most 40 new searches per run. Missing results are cached
+  for 30 days and transient errors for six hours. Per-book errors are contained.
+- Added optional book title, author, cover data URL, and cover status to the
+  frontend contract. Home and Books render cached real images and retain the
+  typographic fallback. Books has a manual cover-download button with a busy
+  state and available-count display.
+- Added seven isolated tests using synthetic book data and mocked network
+  responses; no user vocabulary database or runtime cover files were read.
+- API contract checked against the official Open Library Search and Covers API
+  documentation.
+
+### Verification
+
+- `conda run -n kindle_app python -m unittest tests.test_book_covers -v`: 7 passed.
+- `conda run -n kindle_app npm run build`: passed.
+- `git diff --check`: passed before this log append.
+
+### Remaining Risk
+
+- Bridge/controller wiring and the real Kindle-thumbnail copy are handled by
+  the integration lane. A live cover download and final Tauri visual pass were
+  not performed in this isolated lane.
+
+## 2026-09-30 - Codex occurrence identity subagent - Preserve distinct Kindle lookups
+
+### Goal
+
+Keep each Kindle lookup distinct while avoiding duplicate occurrences when an existing content-hash catalog is synchronized again with stable Kindle lookup IDs.
+
+### Changes
+
+- `kindle_vocab_app/vocab_cache.py`: Kindle entries with a `lookup_id` now use SHA1 of `kindle|lookup-id|<id>` as the occurrence ID. Entries without a lookup ID retain the previous content-hash behavior.
+- Before adding an ID-backed lookup, the merge removes only matching legacy Kindle content-hash occurrences calculated with the full timestamp or the earlier date-only timestamp. Existing ID-backed occurrences are left intact.
+- `tests/test_vocab_catalog.py`: added identical-content distinct-ID and repeated-sync checks, plus transition checks for both legacy hash variants.
+- `tests/test_kindle_mtp.py`: updated the synthetic MTP session to allow optional root listing for device metadata.
+
+### Verification
+
+- `conda run -n kindle_app python -m unittest tests.test_vocab_catalog -v`: 6 passed.
+- `conda run -n kindle_app python -m unittest discover -s tests -v`: 40 passed.
+- `git diff --check`: passed.
+
+### Remaining Risk
+
+- A live repeat sync after the current queue finishes is still needed to confirm aggregate lookup counts against the connected Kindle. No personal vocabulary contents were inspected for this change.
+
+## 2026-09-30 - Codex subagent - Recover real book-cover matches
+
+### Goal
+
+Improve cover matching after the first live Kindle synchronization returned no
+covers for books whose metadata included file provenance or series decorations.
+
+### Changes
+
+- `kindle_vocab_app/book_covers.py` now strips only recognized trailing source,
+  author, copy-number, and series markers for search/display. It preserves the
+  original Kindle title in application occurrences. Author matching handles
+  reversed names and missing spaces, and title matching treats apostrophes
+  consistently.
+- Added a bounded second title candidate only when a numbered series prefix
+  overlaps the true title. A broad Open Library query can recover punctuation
+  variants, but the returned title and author still need exact normalized
+  matching and a unique work.
+- Local Kindle thumbnail matching accepts an explicit `asin` field when book
+  keys are UUIDs. Negative cache entries carry `search_version`; old misses are
+  retried without deleting cache files. Manual calls can use
+  `retry_errors=True` to retry transient failures.
+- Accepted HTTPS redirects from the Open Library Covers API to `archive.org`
+  and strict `*.us.archive.org` hosts. Initial requests remain limited to
+  Open Library; response host, JPEG type, size, and timeouts are checked.
+- Expanded synthetic tests for cleanup, strict matching, local ASIN matching,
+  negative-cache refresh, manual retry, and trusted/untrusted redirects.
+
+### Verification
+
+- `conda run -n kindle_app python -m unittest tests.test_book_covers -v`: 17 passed.
+- `conda run -n kindle_app python -m unittest discover -s tests`: 50 passed.
+- A read-only search for several public titles found exact Cover IDs; one
+  full HTTPS search and JPEG download into a temporary test directory returned
+  `downloaded=1` and `cover_status=available`.
+
+### Remaining Risk
+
+- Some books may have no exact Open Library work with a cover. They keep the
+  typographic fallback rather than receiving a guessed image. The integration
+  lane must pass `retry_errors=True` for the manual Books action.
+
+## 2026-09-30 - Codex - Live macOS Kindle synchronization and covers
+
+### Goal
+
+Read the user's connected USB Kindle, add macOS MTP support and genuine cached
+book covers, and verify synchronization against the physical device.
+
+### Decisions And Changes
+
+- Identified an Amazon Kindle over USB MTP rather than a mounted volume.
+  Downloaded OpenMTP 3.3.0 for Apple Silicon from its official GitHub release,
+  verified its Developer ID and notarization with macOS, and installed it in
+  Applications. No additional global package manager was installed.
+- Added a read-only Kalam adapter in `kindle_mtp.py`. Native transfers run in a
+  bounded subprocess with a local exclusive lock, Kindle identity verification,
+  fixed source paths, staged SQLite validation, and atomic cache replacement.
+  Passive device polling reads USB identity without opening Kindle storage.
+- Connected the adapter through `kindle_device.py`. Preserved the existing
+  mounted-volume and Windows MTP paths. No files were written to the Kindle.
+- Integrated cached ASIN metadata and local Kindle thumbnails with the cover
+  service. Connected automatic cover fetching after Kindle sync, manual Books
+  downloads, transient-error retry, offline cache reads, counts, and UI states.
+  Added cleaned shelf titles while preserving original occurrence metadata.
+- Retained full Kindle timestamps and stable lookup IDs. Compatibility migration
+  now preserves distinct identical lookups and avoids duplicating older hashes.
+- Updated README and architecture/action notes. All personal databases, images,
+  local backups, and optimizer outputs remain under ignored app data.
+
+### Verification
+
+- Live transfer copied a validated Vocabulary Builder database and 61 nonempty
+  portrait thumbnails. The library contains 1,760 canonical lexemes, 2,522
+  distinct lookups, and 7 books after deterministic processing and consolidation.
+- Initial queue processing completed. Repeated live synchronization left the
+  queue empty; a subsequent processing call processed zero new lexemes.
+- Six of seven books have real cached covers: one matched Kindle thumbnail and
+  five Open Library downloads. The unmatched book retains a typographic jacket.
+- Fixed two concrete integration failures: `ioreg` needs `-l` to include USB
+  identity properties in its plist, and Covers API image redirects use the
+  Internet Archive HTTPS hosts. Both now have focused coverage.
+- `python -m unittest discover -s tests`: 50 passed.
+- `npm test`: 10 passed. TypeScript/Vite build and a macOS debug app bundle built
+  successfully using `npm run tauri build -- --debug --bundles app`.
+- Launched the actual bundled Tauri app with the workspace Python runtime.
+  Reviewed the Books screen screenshot with real cached covers and aggregate
+  counts; invoked the cover-download button and verified the bridge action.
+- `git diff --check`: passed. Personal app data is ignored by Git.
+
+### Remaining Limits
+
+- One book has no exact cover match; no substitute image was guessed.
+- macOS became locked after the successful Books visual pass, so an additional
+  Home screenshot was unavailable. The final UI build is verified by compilation.
+- The debug app still uses the project's Python runtime; distributing a fully
+  self-contained desktop package is separate work. Close OpenMTP while Kindle
+  Cards owns the MTP connection.

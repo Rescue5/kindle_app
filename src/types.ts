@@ -1,6 +1,19 @@
 export type BookOption = {
   label: string;
   key: string;
+  title?: string;
+  display_title?: string;
+  authors?: string;
+  cover_data_url?: string;
+  cover_status?: "available" | "missing" | "error" | "pending" | "unavailable";
+};
+
+export type CoverSummary = {
+  available: number;
+  total: number;
+  downloaded: number;
+  missing: number;
+  errors: number;
 };
 
 export type OccurrenceSource = "kindle" | "legacy";
@@ -103,6 +116,7 @@ export type LibraryResult = {
   sourceName: string;
   sourceStatus: string;
   books: BookOption[];
+  coverSummary?: CoverSummary;
   entries: LexemeRecord[];
   last_kindle_sync_id: string;
   connectors: ConnectorStatus;
@@ -147,7 +161,7 @@ export type AppSettings = {
   obsidian_backup_enabled: boolean;
 };
 
-export type OperationKind = "idle" | "kindle" | "processing" | "obsidian" | "export";
+export type OperationKind = "idle" | "kindle" | "covers" | "processing" | "obsidian" | "export";
 export type OperationStatus = "idle" | "running" | "completed" | "cancelled" | "error";
 
 export type Operation = {

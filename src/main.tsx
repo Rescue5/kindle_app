@@ -1,75 +1,94 @@
 import * as React from "react";
 import ReactDOM from "react-dom/client";
-import { BarChart3, BookOpen, Library, Settings, Upload } from "lucide-react";
+import { BarChart3, BookOpen, Home, Library, RotateCcw, Settings } from "lucide-react";
 import { SettingsView } from "@/components/settings-view";
 import { LibraryWorkspace } from "@/features/library/library-workspace";
 import { useLibraryController } from "@/features/library/use-library-controller";
+import { BooksView } from "@/features/reading/books-view";
+import { InsightsView } from "@/features/reading/insights-view";
+import { ReadingHome } from "@/features/reading/reading-home";
+import { ReviewView } from "@/features/reading/review-view";
+import { callBackend } from "@/lib/backend";
+import type { LexemeRecord } from "@/types";
 import "@/index.css";
+import "@/features/reading/reading.css";
 
-type View = "library" | "settings";
+type View = "home" | "books" | "words" | "review" | "insights" | "settings";
 
 const navigation = [
-  { label: "Библиотека", icon: Library, view: "library" as const, enabled: true },
-  { label: "Обработка", icon: BookOpen, view: "library" as const, enabled: false },
-  { label: "Экспорты", icon: Upload, view: "library" as const, enabled: false },
-  { label: "Аналитика", icon: BarChart3, view: "library" as const, enabled: false },
-  { label: "Настройки", icon: Settings, view: "settings" as const, enabled: true },
+  { label: "Главная", icon: Home, view: "home" as const },
+  { label: "Книги", icon: BookOpen, view: "books" as const },
+  { label: "Слова", icon: Library, view: "words" as const },
+  { label: "Повторение", icon: RotateCcw, view: "review" as const },
+  { label: "Аналитика", icon: BarChart3, view: "insights" as const },
+  { label: "Настройки", icon: Settings, view: "settings" as const },
 ];
 
 function App() {
   const controller = useLibraryController();
-  const [view, setView] = React.useState<View>("library");
+  const [view, setView] = React.useState<View>("home");
+  const [dueCount, setDueCount] = React.useState(0);
 
-  function changeView(next: View) {
-    setView(next);
-    if (next === "library") void controller.loadLibrary();
+  React.useEffect(() => {
+    let active = true;
+    void callBackend<{ due_count: number }>("load_review", { limit: 1 })
+      .then((result) => { if (active) setDueCount(result.due_count); })
+      .catch(() => { if (active) setDueCount(0); });
+    return () => { active = false; };
+  }, [controller.entries]);
+
+  function openWord(entry?: LexemeRecord | string) {
+    controller.setQuery("");
+    controller.setSelectedBookKey("");
+    controller.setQuickFilter("all");
+    if (entry) controller.setSelectedId(typeof entry === "string" ? entry : entry.id);
+    setView("words");
   }
 
-  return (
-    <div className="premium-grid flex h-full min-h-[620px] w-full overflow-hidden text-foreground">
-      <aside className="flex w-[168px] flex-none flex-col border-r border-line bg-background/70 px-3 py-4">
-        <div className="flex h-9 items-center gap-2.5 px-2 text-sm font-semibold">
-          <BookOpen size={18} className="text-primary" />
-          <span>Kindle Cards</span>
-        </div>
+  function openNewWords() {
+    controller.setQuery("");
+    controller.setSelectedBookKey("");
+    controller.setQuickFilter("new");
+    setView("words");
+  }
 
-        <nav className="mt-6 space-y-1" aria-label="Основная навигация">
+  const busy = controller.operation.status === "running";
+  const status = busy
+    ? controller.operation.message || controller.operation.title
+    : controller.operation.status === "error"
+      ? controller.operation.error || controller.operation.message || controller.operation.title
+      : controller.operation.kind === "covers" && controller.operation.status === "completed"
+        ? controller.operation.message
+      : controller.queueStatus.total > 0
+        ? `Обработка: ${controller.queueStatus.total} слов`
+        : "Библиотека готова";
+
+  return (
+    <div className="reading-app">
+      <aside className="reading-sidebar">
+        <button type="button" className="reading-brand" onClick={() => setView("home")} aria-label="Kindle Cards — главная">
+          <span className="reading-brand-mark"><BookOpen size={23} strokeWidth={1.8} /></span>
+          <span><strong>Kindle Cards</strong><small>Слова из вашего чтения</small></span>
+        </button>
+        <nav className="reading-nav" aria-label="Основная навигация">
           {navigation.map((item) => {
             const Icon = item.icon;
-            const active = item.enabled && view === item.view && (item.view !== "library" || item.label === "Библиотека");
-            return (
-              <button
-                key={item.label}
-                type="button"
-                disabled={!item.enabled}
-                onClick={() => item.enabled && changeView(item.view)}
-                className={`flex h-9 w-full items-center gap-2.5 rounded-[7px] px-2.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/45 ${
-                  active
-                    ? "bg-secondary text-foreground"
-                    : item.enabled
-                      ? "text-muted-foreground hover:bg-secondary/55 hover:text-foreground active:bg-secondary/75"
-                      : "cursor-not-allowed text-muted-foreground/40"
-                }`}
-              >
-                <Icon size={15} />
-                {item.label}
-              </button>
-            );
+            return <button key={item.view} type="button" onClick={() => setView(item.view)} aria-current={view === item.view ? "page" : undefined} className={view === item.view ? "is-active" : ""}><Icon size={18} strokeWidth={1.8} /><span>{item.label}</span>{item.view === "review" && dueCount > 0 ? <em>{dueCount}</em> : null}</button>;
           })}
         </nav>
-
-        <div className="mt-auto border-t border-line px-2 pt-3 text-[11px] leading-5 text-muted-foreground">
-          <div className="flex items-center justify-between"><span>Леммы</span><span className="tabular-nums text-foreground/80">{controller.entries.length}</span></div>
-          <div className="flex items-center justify-between"><span>Новые</span><span className="tabular-nums text-foreground/80">{controller.entries.filter((entry) => entry.freshness === "new").length}</span></div>
-        </div>
+        <div className="reading-sidebar-bottom"><span>В библиотеке</span><strong>{controller.entries.length} слов</strong></div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        {view === "library" ? (
-          <LibraryWorkspace controller={controller} />
-        ) : (
-          <SettingsView settings={controller.settings} onChange={controller.setSettings} />
-        )}
+      <div className="reading-app-main">
+        <div className="reading-view-frame">
+          {view === "home" ? <ReadingHome bookOptions={controller.books} entries={controller.entries} connectors={controller.connectors} operation={controller.operation} queueStatus={controller.queueStatus} dueCount={dueCount} onSync={() => void controller.syncKindle()} onReview={() => setView("review")} onBooks={() => setView("books")} onWords={openWord} onNewWords={openNewWords} /> : null}
+          {view === "books" ? <BooksView books={controller.books} entries={controller.entries} onOpenWord={openWord} onDownloadCovers={controller.downloadCovers} coversBusy={controller.coversBusy || controller.operation.status === "running"} coverSummary={controller.coverSummary} /> : null}
+          {view === "words" ? <LibraryWorkspace controller={controller} /> : null}
+          {view === "review" ? <ReviewView onCountsChange={setDueCount} onOpenWords={() => openWord()} /> : null}
+          {view === "insights" ? <InsightsView books={controller.books} entries={controller.entries} onOpenWord={openWord} /> : null}
+          {view === "settings" ? <SettingsView settings={controller.settings} onChange={controller.setSettings} /> : null}
+        </div>
+        <div className="reading-status" role="status"><span className={busy ? "reading-status-dot is-busy" : "reading-status-dot"} />{status}{controller.operation.status === "error" ? <button type="button" onClick={controller.retry}>Повторить</button> : null}</div>
       </div>
     </div>
   );
@@ -78,8 +97,4 @@ function App() {
 const rootElement = document.getElementById("root")!;
 const rootState = rootElement as typeof rootElement & { __kindleCardsRoot?: ReturnType<typeof ReactDOM.createRoot> };
 rootState.__kindleCardsRoot ??= ReactDOM.createRoot(rootElement);
-rootState.__kindleCardsRoot.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+rootState.__kindleCardsRoot.render(<React.StrictMode><App /></React.StrictMode>);

@@ -19,6 +19,7 @@ class Book:
     title: str
     authors: str
     lookup_count: int
+    asin: str = ""
 
 
 def normalize_timestamp(value: int | None) -> str:
@@ -56,16 +57,20 @@ def validate_vocab_db(db_path: Path) -> None:
 
 def list_books(db_path: Path) -> list[Book]:
     logger.info("Listing Kindle books path=%s", db_path)
-    query = """
+    with _connect(db_path) as connection:
+        columns = {row["name"].casefold() for row in connection.execute("PRAGMA table_info(BOOK_INFO)")}
+    asin_expression = "COALESCE(b.asin, '')" if "asin" in columns else "''"
+    query = f"""
         SELECT
             COALESCE(b.id, b.guid, l.book_key, '') AS key,
             COALESCE(NULLIF(b.title, ''), 'Unknown book') AS title,
             COALESCE(NULLIF(b.authors, ''), '') AS authors,
+            {asin_expression} AS asin,
             COUNT(*) AS lookup_count
         FROM LOOKUPS l
         LEFT JOIN BOOK_INFO b
             ON l.book_key = b.id OR l.book_key = b.guid
-        GROUP BY key, title, authors
+        GROUP BY key, title, authors, asin
         ORDER BY lower(title), lower(authors)
     """
     with _connect(db_path) as connection:
@@ -76,6 +81,7 @@ def list_books(db_path: Path) -> list[Book]:
             title=str(row["title"]),
             authors=str(row["authors"] or ""),
             lookup_count=int(row["lookup_count"]),
+            asin=str(row["asin"] or ""),
         )
         for row in rows
     ]

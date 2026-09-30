@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from kindle_vocab_app import obsidian_sync, settings, vocab_cache
+from kindle_vocab_app import book_covers, obsidian_sync, settings, vocab_cache
 from kindle_vocab_app.kindle_db import fetch_entries, list_books, validate_vocab_db
 from kindle_vocab_app.kindle_device import find_kindle_presence, find_kindle_source
 from kindle_vocab_app.library_repository import repository_for
@@ -49,15 +49,36 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
         return _catalog_response(
             catalog,
+            workspace=workspace,
             connector_status=_connector_status(workspace, probe_kindle=False),
             queue_status=repository_for(workspace).queue_status(),
+        )
+
+    if action == "load_review":
+        return repository_for(workspace).load_review(limit=payload.get("limit", 20))
+
+    if action == "rate_review":
+        return repository_for(workspace).rate_review(
+            str(payload.get("lexeme_id") or ""), str(payload.get("rating") or "")
         )
 
     if action == "connector_status":
         return _connector_status(workspace, probe_kindle=True)
 
+    if action == "download_covers":
+        catalog = repository_for(workspace).load_catalog()
+        _emit_progress(job_id, "covers", "Загружаем обложки книг", 0, 1)
+        summary = _download_book_covers(catalog, workspace, retry_errors=True)
+        _emit_progress(job_id, "completed", "Обложки сохранены", 1, 1)
+        result = _catalog_response(catalog, workspace=workspace,
+                                   connector_status=_connector_status(workspace, probe_kindle=False),
+                                   queue_status=repository_for(workspace).queue_status())
+        result["coverSummary"].update(summary)
+        result["coverSummary"]["downloaded"] = summary["downloaded"] + summary["local_copied"]
+        return result
+
     if action in {"sync_kindle", "scan"}:
-        _emit_progress(job_id, "detecting", "Ищем подключённый Kindle", 0, 4)
+        _emit_progress(job_id, "detecting", "Ищем подключённый Kindle", 0, 5)
         source = find_kindle_source()
         catalog = _load_catalog_with_sources(workspace, reconcile_kindle=False, reconcile_obsidian=False)
         if source is None:
@@ -66,20 +87,23 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
             disconnected["kindle"] = {"state": "disconnected", "label": "Kindle", "checked_at": vocab_cache.utc_now()}
             return _catalog_response(
                 catalog,
+                workspace=workspace,
                 connector_status=disconnected,
                 queue_status=repository_for(workspace).queue_status(),
             )
-        _emit_progress(job_id, "copying", "Копируем vocab.db в локальный кэш", 1, 4)
+        _emit_progress(job_id, "copying", "Копируем vocab.db и обложки в локальный кэш", 1, 5)
         db_path = source.copy_to_cache(workspace / ".app-data" / "cache")
         validate_vocab_db(db_path)
-        _emit_progress(job_id, "parsing", "Читаем слова и контексты", 2, 4)
+        _emit_progress(job_id, "parsing", "Читаем слова и контексты", 2, 5)
         entries = [_entry_for_frontend(entry) for entry in fetch_entries(db_path)]
         sync_id = uuid.uuid4().hex
-        _emit_progress(job_id, "merging", "Объединяем формы и известные леммы", 3, 4)
+        _emit_progress(job_id, "merging", "Объединяем формы и известные леммы", 3, 5)
         catalog = vocab_cache.merge_kindle(catalog, entries, sync_id=sync_id, mark_new=True)
         _refresh_obsidian_destination_states(catalog)
         repository_for(workspace).save_catalog(catalog)
-        _emit_progress(job_id, "completed", "Синхронизация Kindle завершена", 4, 4)
+        _emit_progress(job_id, "covers", "Сохраняем обложки книг", 4, 5)
+        _download_book_covers(catalog, workspace)
+        _emit_progress(job_id, "completed", "Синхронизация Kindle завершена", 5, 5)
         logger.info(
             "Kindle synchronization completed job_id=%s sync_id=%s entries=%d lexemes=%d",
             job_id,
@@ -96,6 +120,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
             }
         return _catalog_response(
             catalog,
+            workspace=workspace,
             source_name=source.label,
             source_status="Vocabulary Builder синхронизирован",
             connector_status=connector_status,
@@ -107,6 +132,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         catalog = vocab_cache.merge_kindle(vocab_cache.empty_catalog(), raw, sync_id="demo", mark_new=True)
         return _catalog_response(
             catalog,
+            workspace=workspace,
             source_name="Demo Kindle",
             source_status="Демонстрационные данные",
             queue_status={"pending": len(catalog["lexemes"]), "processing": 0, "failed": 0, "total": len(catalog["lexemes"])},
@@ -167,6 +193,7 @@ def dispatch(action: str, payload: dict[str, Any], workspace: Path) -> dict[str,
         repository.save_catalog(catalog)
         return _catalog_response(
             catalog,
+            workspace=workspace,
             source_name="Obsidian",
             source_status=f"Сверено карточек: {card_count}",
             connector_status=_connector_status(workspace, probe_kindle=False),
@@ -441,15 +468,43 @@ def _connector_status(workspace: Path, *, probe_kindle: bool) -> dict[str, Any]:
 def _catalog_response(
     catalog: dict[str, Any],
     *,
+    workspace: Path | None = None,
     source_name: str = "Локальная библиотека",
     source_status: str = "Сохранённые слова доступны без устройства",
     connector_status: dict[str, Any] | None = None,
     queue_status: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     result = vocab_cache.frontend_state(catalog, source_name=source_name, source_status=source_status)
+    workspace = workspace or _workspace_root()
+    result["books"] = book_covers.attach_covers(result["books"], workspace / ".app-data" / "covers")
+    for book in result["books"]:
+        if book.get("title"):
+            book["display_title"] = book_covers.clean_book_title(str(book["title"]), str(book.get("authors") or ""))
+    real_books = [book for book in result["books"] if book.get("key")]
+    result["coverSummary"] = {"available": sum(bool(book.get("cover_data_url")) for book in real_books),
+                              "total": len(real_books),
+                              "missing": sum(book.get("cover_status") == "missing" for book in real_books),
+                              "errors": sum(book.get("cover_status") == "error" for book in real_books)}
     result["connectors"] = connector_status or _connector_status(_workspace_root(), probe_kindle=False)
     result["queueStatus"] = queue_status or {"pending": 0, "processing": 0, "failed": 0, "total": 0}
     return result
+
+
+def _download_book_covers(catalog: dict[str, Any], workspace: Path, *, retry_errors: bool = False) -> dict[str, int]:
+    books = vocab_cache.books_from_lexemes(catalog.get("lexemes") or [])
+    db_path = workspace / ".app-data" / "cache" / "vocab.db"
+    if db_path.is_file():
+        try:
+            identifiers = {book.key: book.asin for book in list_books(db_path)}
+            books = [{**book, "asin": identifiers.get(str(book.get("key")), "")} for book in books]
+        except Exception:
+            logger.warning("Could not read book cover identifiers from cached Kindle database")
+    return book_covers.download_covers(
+        books,
+        workspace / ".app-data" / "covers",
+        local_thumbnail_dir=workspace / ".app-data" / "cache" / "kindle-thumbnails",
+        retry_errors=retry_errors,
+    )
 
 
 def _lexeme_as_entry(lexeme: dict[str, Any]) -> dict[str, Any]:
@@ -676,7 +731,8 @@ def _entry_for_frontend(entry: dict[str, object]) -> dict[str, str]:
         "book_title": str(entry.get("book_title") or ""),
         "authors": str(entry.get("authors") or ""),
         "language": str(entry.get("language") or ""),
-        "looked_up_at": str(entry.get("looked_up_at") or "").split("T", maxsplit=1)[0],
+        "lookup_id": str(entry.get("lookup_id") or ""),
+        "looked_up_at": str(entry.get("looked_up_at") or ""),
         "processing_status": "raw",
         "export_status": "none",
     }

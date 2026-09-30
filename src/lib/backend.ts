@@ -128,8 +128,31 @@ function makeLexeme(index: number): LexemeRecord {
 }
 
 let mockEntries = baseWords.map((_, index) => makeLexeme(index));
+const mockReview = new Map<string, { due_at: string; interval_days: number; repetitions: number; last_rating: string; reviewed_at: string }>();
 const cancelledJobs = new Set<string>();
 let mockFailureConsumed = false;
+
+function mockReviewResult(limit = 20) {
+  const now = Date.now();
+  const eligible = mockEntries.filter((entry) => entry.processing.state === "ready" && entry.processing.analysis?.accepted);
+  const due = eligible.filter((entry) => {
+    const schedule = mockReview.get(entry.id);
+    return !schedule?.due_at || Date.parse(schedule.due_at) <= now;
+  });
+  return {
+    cards: due.slice(0, limit).map((entry) => ({
+      lexeme_id: entry.id,
+      lemma: entry.lemma,
+      display_form: entry.display_form,
+      analysis: entry.processing.analysis,
+      occurrences: entry.occurrences,
+      first_seen_at: entry.first_seen_at,
+      review: mockReview.get(entry.id) ?? { due_at: "", interval_days: 0, repetitions: 0, last_rating: "", reviewed_at: "" },
+    })),
+    due_count: due.length,
+    total_count: eligible.length,
+  };
+}
 
 function mockConnectors(): ConnectorStatus {
   const scenario = previewScenario();
@@ -150,12 +173,18 @@ function mockConnectors(): ConnectorStatus {
 
 function buildBooks(entries: LexemeRecord[]): BookOption[] {
   const counts = new Map<string, number>();
+  const details = new Map<string, { title: string; authors: string }>();
   for (const entry of entries) {
     for (const key of new Set(entry.occurrences.map((item) => item.book_key).filter(Boolean))) {
       counts.set(key, (counts.get(key) ?? 0) + 1);
+      const occurrence = entry.occurrences.find((item) => item.book_key === key);
+      if (occurrence && !details.has(key)) details.set(key, { title: occurrence.book_title || key, authors: occurrence.authors });
     }
   }
-  return [{ label: "Все книги", key: "" }, ...Array.from(counts, ([key, count]) => ({ label: `${key} · ${count}`, key }))];
+  return [{ label: "Все книги", key: "" }, ...Array.from(counts, ([key, count]) => {
+    const { title, authors } = details.get(key) ?? { title: key, authors: "" };
+    return { label: `${title}${authors ? ` · ${authors}` : ""} · ${count}`, key, title, authors };
+  })];
 }
 
 function libraryResult(): LibraryResult {
@@ -183,7 +212,17 @@ async function mockBackend<T>(action: string, payload: unknown): Promise<T> {
   if (action === "load_settings") return { ...defaultSettings, obsidian_sync_enabled: true, obsidian_vault_path: "preview" } as T;
   if (action === "save_settings") return { saved: true } as T;
   if (action === "connector_status") return mockConnectors() as T;
-  if (["load_library", "load_cached", "sync_kindle", "scan"].includes(action)) return libraryResult() as T;
+  if (["load_library", "load_cached", "sync_kindle", "scan", "download_covers"].includes(action)) return libraryResult() as T;
+  if (action === "load_review") return mockReviewResult((payload as { limit?: number } | undefined)?.limit ?? 20) as T;
+  if (action === "rate_review") {
+    const { lexeme_id, rating } = payload as { lexeme_id: string; rating: "again" | "hard" | "good" };
+    const previous = mockReview.get(lexeme_id);
+    const interval = rating === "again" ? 0 : rating === "hard" ? Math.max(1, (previous?.interval_days ?? 0) * 1.2) : Math.max(3, (previous?.interval_days ?? 0) * 2.5);
+    const now = new Date();
+    mockReview.set(lexeme_id, { due_at: new Date(now.getTime() + (rating === "again" ? 10 * 60_000 : interval * 86_400_000)).toISOString(), interval_days: interval, repetitions: (previous?.repetitions ?? 0) + 1, last_rating: rating, reviewed_at: now.toISOString() });
+    const result = mockReviewResult();
+    return { card: result.cards.find((card) => card.lexeme_id === lexeme_id) ?? null, due_count: result.due_count, total_count: result.total_count } as T;
+  }
   if (["process_queue", "process_lexemes", "optimize"].includes(action)) {
     const requested = (payload as { ids?: string[] })?.ids;
     const ids = new Set(requested ?? mockEntries.filter((entry) => ["pending", "failed"].includes(entry.processing.state)).map((entry) => entry.id));

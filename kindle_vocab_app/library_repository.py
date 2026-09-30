@@ -4,6 +4,7 @@ import json
 import shutil
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
@@ -14,7 +15,7 @@ from kindle_vocab_app.logging_config import get_logger
 logger = get_logger(__name__)
 
 DATABASE_FILENAME = "kindle_cards.sqlite3"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class VocabularyRepository(Protocol):
@@ -191,6 +192,107 @@ class SQLiteVocabularyRepository:
         ids = [str(row["lexeme_id"]) for row in rows]
         return [item for item in ids if requested_ids is None or item in requested_ids]
 
+    def load_review(self, *, limit: int = 20, now: datetime | None = None) -> dict[str, Any]:
+        """Return due accepted lexemes without creating review state for unseen cards."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("limit must be an integer from 1 to 100")
+        current = _review_now(now)
+        catalog = self.load_catalog()
+        with self.connect() as connection:
+            states = {
+                str(row["lexeme_id"]): dict(row)
+                for row in connection.execute(
+                    "SELECT lexeme_id, interval_days, repetitions, due_at, reviewed_at, last_rating FROM review_cards"
+                )
+            }
+        cards = []
+        for lexeme in catalog["lexemes"]:
+            if not _review_eligible(lexeme):
+                continue
+            state = states.get(str(lexeme["id"]))
+            card = _review_card(lexeme, state)
+            cards.append(card)
+        due = [
+            card for card in cards
+            if not card["review"]["due_at"]
+            or datetime.fromisoformat(card["review"]["due_at"]) <= current
+        ]
+        due.sort(key=lambda card: (
+            card["review"]["due_at"] or "",
+            card["first_seen_at"],
+            card["lemma"],
+        ))
+        return {"cards": due[:limit], "due_count": len(due), "total_count": len(cards)}
+
+    def rate_review(
+        self, lexeme_id: str, rating: str, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        if rating not in {"again", "hard", "good"}:
+            raise ValueError("rating must be again, hard, or good")
+        current = _review_now(now)
+        with self.connect() as connection:
+            lexeme = connection.execute(
+                """
+                SELECT l.id, a.state, a.payload_json
+                FROM lexemes AS l JOIN analyses AS a ON a.lexeme_id = l.id
+                WHERE l.id = ?
+                """,
+                (lexeme_id,),
+            ).fetchone()
+            if lexeme is None or lexeme["state"] != "ready":
+                raise ValueError("review card is unavailable")
+            try:
+                analysis = json.loads(lexeme["payload_json"] or "null")
+            except json.JSONDecodeError:
+                analysis = None
+            if not isinstance(analysis, dict) or analysis.get("accepted") is not True:
+                raise ValueError("review card is unavailable")
+            previous = connection.execute(
+                "SELECT interval_days, repetitions, due_at FROM review_cards WHERE lexeme_id = ?",
+                (lexeme_id,),
+            ).fetchone()
+            if previous and datetime.fromisoformat(str(previous["due_at"])) > current:
+                raise ValueError("review card is not due yet")
+            old_interval = float(previous["interval_days"]) if previous else 0.0
+            old_repetitions = int(previous["repetitions"]) if previous else 0
+            if rating == "again":
+                interval_days, repetitions = 10 / 1440, 0
+            elif rating == "hard":
+                interval_days, repetitions = max(1.0, old_interval * 1.2), old_repetitions + 1
+            else:
+                interval_days, repetitions = max(3.0, old_interval * 2.5), old_repetitions + 1
+            reviewed_at = current.isoformat(timespec="seconds")
+            due_at = (current + timedelta(days=interval_days)).isoformat(timespec="seconds")
+            connection.execute(
+                """
+                INSERT INTO review_cards(
+                    lexeme_id, interval_days, repetitions, due_at, reviewed_at, last_rating
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(lexeme_id) DO UPDATE SET
+                    interval_days = excluded.interval_days,
+                    repetitions = excluded.repetitions,
+                    due_at = excluded.due_at,
+                    reviewed_at = excluded.reviewed_at,
+                    last_rating = excluded.last_rating
+                """,
+                (lexeme_id, interval_days, repetitions, due_at, reviewed_at, rating),
+            )
+        catalog = self.load_catalog()
+        rated = next(item for item in catalog["lexemes"] if item["id"] == lexeme_id)
+        state = {
+            "interval_days": interval_days,
+            "repetitions": repetitions,
+            "due_at": due_at,
+            "reviewed_at": reviewed_at,
+            "last_rating": rating,
+        }
+        queue = self.load_review(limit=1, now=current)
+        return {
+            "card": _review_card(rated, state),
+            "due_count": queue["due_count"],
+            "total_count": queue["total_count"],
+        }
+
     def save_processed_lexeme(self, catalog: dict[str, Any], lexeme_id: str) -> bool:
         """Persist one processing result; return True when a canonical merge occurred."""
         lexeme = next(
@@ -332,7 +434,7 @@ class SQLiteVocabularyRepository:
             version = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            if version is None:
+            if version is None or int(version["version"]) < SCHEMA_VERSION:
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (SCHEMA_VERSION, vocab_cache.utc_now()),
@@ -422,6 +524,15 @@ class SQLiteVocabularyRepository:
                 error TEXT NOT NULL,
                 completed_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS review_cards(
+                lexeme_id TEXT PRIMARY KEY REFERENCES lexemes(id) ON DELETE CASCADE,
+                interval_days REAL NOT NULL DEFAULT 0,
+                repetitions INTEGER NOT NULL DEFAULT 0,
+                due_at TEXT NOT NULL,
+                reviewed_at TEXT NOT NULL,
+                last_rating TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_cards_due ON review_cards(due_at);
             """
         )
 
@@ -455,6 +566,18 @@ class SQLiteVocabularyRepository:
         )
 
     def _replace_catalog(self, connection: sqlite3.Connection, catalog: dict[str, Any]) -> None:
+        # Full catalog replacement is used by Kindle and Obsidian sync. Keep
+        # review progress by canonical identity across the FK cascade.
+        review_states = {
+            (str(row["language"]), str(row["canonical_key"])): row
+            for row in connection.execute(
+                """
+                SELECT l.language, l.canonical_key, r.interval_days,
+                       r.repetitions, r.due_at, r.reviewed_at, r.last_rating
+                FROM review_cards AS r JOIN lexemes AS l ON l.id = r.lexeme_id
+                """
+            )
+        }
         connection.execute("DELETE FROM lexemes")
         now = vocab_cache.utc_now()
         for lexeme in catalog.get("lexemes") or []:
@@ -575,6 +698,23 @@ class SQLiteVocabularyRepository:
                         destination.get("last_exported_at") or "",
                     ),
                 )
+            review_state = review_states.get((lexeme["language"], lexeme["lemma"]))
+            if review_state is not None:
+                connection.execute(
+                    """
+                    INSERT INTO review_cards(
+                        lexeme_id, interval_days, repetitions, due_at, reviewed_at, last_rating
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        lexeme["id"],
+                        review_state["interval_days"],
+                        review_state["repetitions"],
+                        review_state["due_at"],
+                        review_state["reviewed_at"],
+                        review_state["last_rating"],
+                    ),
+                )
         metadata = {
             "last_kindle_sync_id": str(catalog.get("last_kindle_sync_id") or ""),
             "updated_at": now,
@@ -588,6 +728,41 @@ class SQLiteVocabularyRepository:
 
 def repository_for(workspace: Path) -> SQLiteVocabularyRepository:
     return SQLiteVocabularyRepository(workspace)
+
+
+def _review_now(value: datetime | None) -> datetime:
+    current = value or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("review time must include a timezone")
+    return current.astimezone(timezone.utc)
+
+
+def _review_eligible(lexeme: dict[str, Any]) -> bool:
+    processing = lexeme.get("processing") or {}
+    analysis = processing.get("analysis") or {}
+    return (
+        processing.get("state") == "ready"
+        and isinstance(analysis, dict)
+        and analysis.get("accepted") is True
+    )
+
+
+def _review_card(lexeme: dict[str, Any], state: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "lexeme_id": lexeme["id"],
+        "lemma": lexeme["lemma"],
+        "display_form": lexeme["display_form"],
+        "analysis": (lexeme.get("processing") or {}).get("analysis") or {},
+        "occurrences": lexeme.get("occurrences") or [],
+        "first_seen_at": lexeme["first_seen_at"],
+        "review": {
+            "due_at": str(state["due_at"]) if state else "",
+            "interval_days": float(state["interval_days"]) if state else 0.0,
+            "repetitions": int(state["repetitions"]) if state else 0,
+            "last_rating": str(state["last_rating"]) if state else "",
+            "reviewed_at": str(state["reviewed_at"]) if state else "",
+        },
+    }
 
 
 def _canonicalize_catalog(

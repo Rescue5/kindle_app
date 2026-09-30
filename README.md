@@ -122,6 +122,12 @@ events.
 
 Features:
 
+- a reading home with the latest Kindle book, new words, recent words, and a
+  shortcut into review;
+- a Books shelf with per-book words and lookup counts, plus Insights calculated
+  from saved Kindle occurrences and dates;
+- a Review screen with `Не знаю` / `Трудно` / `Знаю` ratings. Its small local
+  schedule is stored in SQLite and remains available after library sync;
 - automatically finding a USB-mounted Kindle and loading
   `system/vocabulary/vocab.db` into a local cache;
 - manually opening a local `vocab.db` as a fallback;
@@ -137,12 +143,38 @@ Features:
 - writing `optimized.tsv` plus per-word JSON analysis files as export/audit
   artifacts.
 
+Review uses only accepted words already processed by the local pipeline. It
+does not invent translations or reading progress; a card shows a translation
+only when one has been saved. The browser preview uses sample words, while the
+Tauri app reads the local SQLite library.
+
 The application checks for newly connected devices with a passive probe once a
 minute. On
 Windows it supports both ordinary drive letters and Kindle devices shown in
 Explorer as `This PC > Kindle` through MTP/WPD. It also supports macOS
-`/Volumes` and common Linux mount locations under `/media`, `/run/media`, and
+`/Volumes`, macOS MTP with OpenMTP, and common Linux mount locations under `/media`, `/run/media`, and
 `/mnt`.
+
+### Kindle USB on macOS
+
+For a Kindle that appears under `/Volumes`, no extra software is needed. Recent
+MTP devices require [OpenMTP](https://openmtp.ganeshrvel.com/), installed in
+`/Applications` or `~/Applications`. Apple Silicon and Intel are supported; the
+native integration has been verified with OpenMTP 3.3.0 on Apple Silicon.
+
+Close OpenMTP's window/app before syncing in Kindle Cards: only one MTP client
+can own the connection. The app uses OpenMTP's Kalam runtime directly, without
+mounting the device. Passive checks inspect USB identity only. A synchronization
+reads `vocab.db`, available portrait thumbnails, and optional Calibre metadata;
+it never writes to the Kindle. The staged SQLite copy is validated before it
+replaces the previous local cache. USB timeouts leave the saved library intact.
+
+Book covers are saved locally under `.app-data/covers`. A Kindle thumbnail with
+a matching ASIN takes priority; missing covers are searched by book title and
+author through [Open Library](https://openlibrary.org/dev/docs/api/covers).
+Vocabulary words and contexts are not sent to the cover service. Cached covers
+work offline. Books → **Загрузить обложки** retries failed downloads; an
+unmatched book keeps its typographic jacket.
 
 ## Optimized Export
 

@@ -52,6 +52,51 @@ class VocabularyCatalogTests(unittest.TestCase):
         self.assertEqual(len(catalog["lexemes"]), 1)
         self.assertEqual(len(catalog["lexemes"][0]["occurrences"]), 2)
 
+    def test_distinct_lookup_ids_preserve_identical_content_and_resync_is_idempotent(self) -> None:
+        first = {
+            **kindle_entry(),
+            "lookup_id": "lookup-one",
+            "looked_up_at": "2026-07-10T12:00:00+00:00",
+        }
+        second = {**first, "lookup_id": "lookup-two"}
+        catalog = vocab_cache.merge_kindle(
+            vocab_cache.empty_catalog(), [first, second], sync_id="one"
+        )
+        occurrences = catalog["lexemes"][0]["occurrences"]
+        self.assertEqual(len(occurrences), 2)
+        self.assertEqual(len({item["id"] for item in occurrences}), 2)
+        self.assertEqual(occurrences[0]["id"], vocab_cache.occurrence_id(first, "kindle"))
+        self.assertEqual(occurrences[1]["id"], vocab_cache.occurrence_id(second, "kindle"))
+
+        catalog = vocab_cache.merge_kindle(catalog, [first, second], sync_id="two")
+        self.assertEqual(len(catalog["lexemes"][0]["occurrences"]), 2)
+
+    def test_lookup_id_replaces_both_legacy_timestamp_hash_variants(self) -> None:
+        current = {
+            **kindle_entry(),
+            "lookup_id": "lookup-one",
+            "looked_up_at": "2026-07-10T12:00:00+00:00",
+        }
+        for legacy_time in ("2026-07-10T12:00:00+00:00", "2026-07-10"):
+            with self.subTest(legacy_time=legacy_time):
+                legacy = {**current, "looked_up_at": legacy_time}
+                legacy.pop("lookup_id")
+                catalog = vocab_cache.merge_kindle(
+                    vocab_cache.empty_catalog(), [legacy], sync_id="old"
+                )
+                old_id = catalog["lexemes"][0]["occurrences"][0]["id"]
+                catalog = vocab_cache.merge_kindle(catalog, [current], sync_id="new")
+                occurrences = catalog["lexemes"][0]["occurrences"]
+                self.assertEqual(len(occurrences), 1)
+                self.assertNotEqual(occurrences[0]["id"], old_id)
+                self.assertEqual(occurrences[0]["id"], vocab_cache.occurrence_id(current, "kindle"))
+
+                another_lookup = {**current, "lookup_id": "lookup-two"}
+                catalog = vocab_cache.merge_kindle(
+                    catalog, [current, another_lookup], sync_id="repeat"
+                )
+                self.assertEqual(len(catalog["lexemes"][0]["occurrences"]), 2)
+
     def test_v1_migration_is_grouped_and_backed_up(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)

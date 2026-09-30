@@ -89,7 +89,9 @@ python -m nltk.downloader -q wordnet omw-1.4 averaged_perceptron_tagger_eng punk
 ## Architecture Map
 
 - `src/main.tsx` is the main UI. It contains the current workspace screen,
-  inspectors, processing pipeline, export flow, status strip, and app state.
+  navigation, status strip, and feature composition.
+- `src/features/reading/` contains the reading home, Books, Review, Insights,
+  and source-backed reading metrics. Review scores are stored in SQLite.
 - `src/lib/backend.ts` is the frontend backend adapter. In Tauri it calls the
   `python_bridge` command; in a plain browser preview it uses mock data.
 - `src/types.ts` defines the frontend contract for vocabulary entries,
@@ -106,14 +108,20 @@ python -m nltk.downloader -q wordnet omw-1.4 averaged_perceptron_tagger_eng punk
 - `kindle_vocab_app/tauri_bridge.py` is the JSON action dispatcher used by the
   frontend.
 - `kindle_vocab_app/kindle_device.py` detects and copies the Kindle `vocab.db`
-  from mounted drives or Windows MTP/WPD.
+  from mounted drives, Windows MTP/WPD, or macOS MTP.
+- `kindle_vocab_app/kindle_mtp.py` runs read-only macOS USB transfers in an
+  isolated worker using an installed OpenMTP Kalam runtime. Passive detection
+  uses USB identity only; never bind native write operations.
+- `kindle_vocab_app/book_covers.py` caches genuine Kindle/Open Library covers.
+  Library loads only read this cache; cover requests never send vocabulary.
 - `kindle_vocab_app/kindle_db.py` reads the SQLite Kindle database and exports
   filtered entries.
 - `kindle_vocab_app/vocab_optimizer.py` performs deterministic offline word
   filtering, scoring, TSV generation, and per-word JSON analysis.
 - `kindle_vocab_app/library_repository.py` owns the authoritative local SQLite
-  library, schema migration, canonical deduplication, processing queue, and
-  destination state. The database is `.app-data/kindle_cards.sqlite3`.
+  library, schema migration, canonical deduplication, processing queue,
+  review schedule, and destination state. The database is
+  `.app-data/kindle_cards.sqlite3`.
 - `kindle_vocab_app/processing_state.py` stores the legacy snapshot used only by
   standalone optimizer CLI compatibility and one-time SQLite migration.
 - `kindle_vocab_app/llm_enricher.py` optionally enriches existing TSV rows
@@ -136,6 +144,8 @@ The Tauri bridge currently supports these actions:
   validate it, merge forms and contexts into SQLite, and enqueue only unseen
   canonical lexemes for processing.
 - `load_demo`: return demo vocabulary state without touching a Kindle or cache.
+- `download_covers`: read cached Kindle book identifiers, cache local thumbnails
+  and exact Open Library matches, and return the refreshed library and counts.
 - `load_library` / `load_cached`: return the SQLite library and durable queue
   status without touching Kindle or Obsidian.
 - `process_queue`: sequentially analyze the persistent SQLite queue and commit
@@ -153,6 +163,8 @@ The Tauri bridge currently supports these actions:
 - `sync_obsidian`: reconcile the live vault, append only eligible
   `ready + accepted + score 3..10` SQLite lexemes, verify the append, and then
   persist destination evidence. Obsidian is never a vocabulary source.
+- `load_review` / `rate_review`: load due accepted words and store a local
+  interval after `again`, `hard`, or `good` ratings.
 
 Bridge output must be clean JSON on stdout. Do not add debug `print(...)` calls
 to stdout in bridge code; use logging/stderr/file logs. The Rust bridge forces
